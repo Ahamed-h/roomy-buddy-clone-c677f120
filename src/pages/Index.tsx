@@ -126,20 +126,6 @@ const Index = () => {
             </div>
           </motion.div>
 
-          {/* Preview image */}
-          <motion.div
-            className="mx-auto mt-16 max-w-5xl overflow-hidden rounded-xl border border-primary/20 shadow-2xl orange-glow"
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3, duration: 0.7 }}
-          >
-            <img
-              src="/images/design-studio-preview.png"
-              alt="aivo.ai Design Studio preview showing 3D room layout editor"
-              className="w-full"
-              loading="lazy"
-            />
-          </motion.div>
         </div>
       </section>
 
