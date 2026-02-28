@@ -213,6 +213,62 @@ const Index = () => {
         </div>
       </section>
 
+      {/* Feature highlights */}
+      <section className="border-t border-border/30 py-24">
+        <div className="container">
+          <div className="grid items-center gap-12 lg:grid-cols-2">
+            <motion.div
+              initial="hidden"
+              whileInView="visible"
+              viewport={{ once: true }}
+              variants={fadeUp}
+              custom={0}
+            >
+              <h2 className="font-display text-3xl font-bold md:text-4xl text-foreground">
+                Photorealistic before you purchase
+              </h2>
+              <p className="mt-4 text-muted-foreground">
+                Generate renders with real lighting and materials. See exactly what your room will look like, not an approximation.
+              </p>
+              <div className="mt-6 space-y-4">
+                <div className="flex gap-3">
+                  <Camera className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                  <div>
+                    <h4 className="font-display font-semibold text-foreground">Every store, zero markup</h4>
+                    <p className="text-sm text-muted-foreground">Browse furniture from any retailer on the web. Buy direct at their listed price.</p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <Sparkles className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                  <div>
+                    <h4 className="font-display font-semibold text-foreground">AI that designs with you</h4>
+                    <p className="text-sm text-muted-foreground">Tell RoomBot what you want. It sees your space like a professional and gives you layouts, advice, and pieces that work.</p>
+                  </div>
+                </div>
+              </div>
+              <Button className="mt-8 btn-premium" asChild>
+                <Link to="/design">
+                  Try Design Studio <ArrowRight className="ml-2 h-4 w-4" />
+                </Link>
+              </Button>
+            </motion.div>
+            <motion.div
+              className="overflow-hidden rounded-xl border border-primary/20 shadow-xl orange-glow"
+              initial={{ opacity: 0, x: 30 }}
+              whileInView={{ opacity: 1, x: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.6 }}
+            >
+              <img
+                src="/images/design-studio-features.png"
+                alt="Design Studio features showing photorealistic rendering and furniture marketplace"
+                className="w-full"
+                loading="lazy"
+              />
+            </motion.div>
+          </div>
+        </div>
+      </section>
 
       {/* FAQ */}
       <section className="py-24">
