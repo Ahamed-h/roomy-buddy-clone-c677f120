@@ -1,31 +1,36 @@
-// API service for HF Spaces and edge functions
+// API service for local ML server and edge functions
 
-const DEFAULT_HF_URL = "http://localhost:7860";
+const DEFAULT_API_URL = "http://localhost:8000";
 
 export function getHfSpacesUrl(): string {
-  return localStorage.getItem("roomform_hf_url") || DEFAULT_HF_URL;
+  return localStorage.getItem("roomform_hf_url") || DEFAULT_API_URL;
 }
 
 export function setHfSpacesUrl(url: string) {
   localStorage.setItem("roomform_hf_url", url);
 }
 
+// Response from /analyze endpoint
 export interface AnalysisResult {
   aesthetic_score: number;
-  brightness: number;
+  lighting: { brightness: number };
   objects: Array<{
-    label: string;
+    name: string;
     confidence: number;
     material: string;
-    distance: number;
+    distance_m: number;
     source: string;
-    bbox: number[];
   }>;
   style_traits: Record<string, number>;
-  top_styles: Array<{ style: string; score: number }>;
-  design_metrics: Record<string, number>;
-  material_distribution: Record<string, number>;
+  possible_styles: string[];
+  style_match_scores: Record<string, number>;
+  depth_map: number[][];
   recommendations: string[];
+  // Legacy fields for backwards compat
+  brightness?: number;
+  top_styles?: Array<{ style: string; score: number }>;
+  design_metrics?: Record<string, number>;
+  material_distribution?: Record<string, number>;
 }
 
 export async function analyzeRoom(imageFile: File): Promise<AnalysisResult> {
@@ -45,18 +50,19 @@ export async function analyzeRoom(imageFile: File): Promise<AnalysisResult> {
   return response.json();
 }
 
-// Mock result for demo / when HF Spaces isn't connected
+// Mock result for demo / when backend isn't connected
 export function getMockResult(): AnalysisResult {
   return {
     aesthetic_score: 7.2,
+    lighting: { brightness: 65 },
     brightness: 65,
     objects: [
-      { label: "sofa", confidence: 0.95, material: "fabric", distance: 2.3, source: "YOLO", bbox: [100, 200, 400, 350] },
-      { label: "table", confidence: 0.89, material: "wood", distance: 1.8, source: "YOLO", bbox: [300, 250, 500, 400] },
-      { label: "lamp", confidence: 0.82, material: "metal", distance: 3.1, source: "OWL-ViT", bbox: [50, 100, 120, 250] },
-      { label: "rug", confidence: 0.78, material: "fabric", distance: 1.5, source: "OWL-ViT", bbox: [150, 300, 450, 420] },
-      { label: "window", confidence: 0.91, material: "glass", distance: 4.0, source: "OWL-ViT", bbox: [200, 50, 380, 200] },
-      { label: "cabinet", confidence: 0.85, material: "wood", distance: 2.7, source: "YOLO", bbox: [420, 150, 550, 380] },
+      { name: "sofa", confidence: 0.95, material: "fabric", distance_m: 2.3, source: "YOLO" },
+      { name: "table", confidence: 0.89, material: "wood", distance_m: 1.8, source: "YOLO" },
+      { name: "lamp", confidence: 0.82, material: "metal", distance_m: 3.1, source: "OWL-ViT" },
+      { name: "rug", confidence: 0.78, material: "fabric", distance_m: 1.5, source: "OWL-ViT" },
+      { name: "window", confidence: 0.91, material: "glass", distance_m: 4.0, source: "OWL-ViT" },
+      { name: "cabinet", confidence: 0.85, material: "wood", distance_m: 2.7, source: "YOLO" },
     ],
     style_traits: {
       warm_lighting: 0.72,
@@ -68,6 +74,14 @@ export function getMockResult(): AnalysisResult {
       organic_shapes: 0.55,
       geometric_shapes: 0.48,
     },
+    possible_styles: ["Scandinavian", "Modern", "Minimalist", "Contemporary", "Mid-Century"],
+    style_match_scores: {
+      Scandinavian: 0.82,
+      Modern: 0.71,
+      Minimalist: 0.65,
+      Contemporary: 0.58,
+      "Mid-Century": 0.45,
+    },
     top_styles: [
       { style: "Scandinavian", score: 0.82 },
       { style: "Modern", score: 0.71 },
@@ -75,6 +89,7 @@ export function getMockResult(): AnalysisResult {
       { style: "Contemporary", score: 0.58 },
       { style: "Mid-Century", score: 0.45 },
     ],
+    depth_map: [],
     design_metrics: {
       color_harmony: 7.5,
       contrast_balance: 6.8,
