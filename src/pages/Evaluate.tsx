@@ -5,21 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
 import {
-  Upload, Settings, BarChart3, Eye, Palette, Sparkles, ArrowRight,
-  Download, Info, Loader2, ImageIcon
+  Upload, Settings, BarChart3, Eye, Sparkles, ArrowRight,
+  Download, Info, Loader2, ImageIcon, Layers
 } from "lucide-react";
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis
-} from "recharts";
 import { analyzeRoom, getMockResult, getHfSpacesUrl, setHfSpacesUrl, type AnalysisResult } from "@/services/api";
-
-const CHART_COLORS = ["hsl(152,60%,42%)", "hsl(200,60%,50%)", "hsl(45,80%,55%)", "hsl(280,50%,55%)", "hsl(0,60%,55%)"];
 
 const Evaluate = () => {
   const { toast } = useToast();
@@ -53,14 +46,13 @@ const Evaluate = () => {
     try {
       const data = await analyzeRoom(image);
       setResult(data);
-      // Store for Design Studio
       sessionStorage.setItem("aivo_analysis", JSON.stringify(data));
       if (imagePreview) sessionStorage.setItem("aivo_image", imagePreview);
       toast({ title: "Analysis complete!", description: "Your room has been evaluated." });
     } catch {
       toast({
         title: "Using demo data",
-        description: "HF Spaces not connected. Showing mock analysis results.",
+        description: "Backend not connected. Showing mock analysis results.",
       });
       const mock = getMockResult();
       setResult(mock);
@@ -71,21 +63,18 @@ const Evaluate = () => {
     }
   };
 
-  const metricsData = result
-    ? Object.entries(result.design_metrics).map(([key, value]) => ({
-        name: key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-        value: value as number,
-        fullMark: 10,
-      }))
-    : [];
+  // Helper to get brightness from either new or legacy format
+  const getBrightness = (r: AnalysisResult) => r.lighting?.brightness ?? r.brightness ?? 0;
 
-  const styleData = result
-    ? result.top_styles.map((s) => ({ name: s.style, score: Math.round(s.score * 100) }))
-    : [];
-
-  const materialData = result
-    ? Object.entries(result.material_distribution).map(([name, value]) => ({ name, value }))
-    : [];
+  // Style scores: prefer new format, fall back to legacy
+  const getStyleScores = (r: AnalysisResult): Array<{ style: string; score: number }> => {
+    if (r.style_match_scores && Object.keys(r.style_match_scores).length > 0) {
+      return Object.entries(r.style_match_scores)
+        .map(([style, score]) => ({ style, score: score as number }))
+        .sort((a, b) => b.score - a.score);
+    }
+    return r.top_styles || [];
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -111,14 +100,14 @@ const Evaluate = () => {
                 <Input
                   value={hfUrl}
                   onChange={(e) => setHfUrl(e.target.value)}
-                  placeholder="http://localhost:7860"
+                  placeholder="http://localhost:8000"
                 />
                 <Button onClick={() => { setHfSpacesUrl(hfUrl); toast({ title: "Saved!" }); }}>
                   Save
                 </Button>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
-                Your local ML server URL. Default: http://localhost:7860. See the About page for setup instructions.
+                Your local ML server URL. Default: http://localhost:8000.
               </p>
             </CardContent>
           </Card>
@@ -141,14 +130,14 @@ const Evaluate = () => {
                     </Button>
                     <Button onClick={runAnalysis} disabled={loading}>
                       {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                      {loading ? "Analyzing..." : "Run AI Analysis"}
+                      {loading ? "Analyzing..." : "Run AI Evaluation"}
                     </Button>
                   </div>
                 </div>
               ) : (
                 <>
                   <Upload className="mb-4 h-12 w-12 text-muted-foreground" />
-                  <h3 className="font-display text-xl font-semibold">Upload your room photo</h3>
+                  <h2 className="font-display text-xl font-semibold">Upload your room photo</h2>
                   <p className="mt-2 text-sm text-muted-foreground">Drag & drop or click to browse. JPG/PNG, up to 10MB.</p>
                   <label className="mt-4 cursor-pointer">
                     <Button asChild><span>Choose File</span></Button>
@@ -198,7 +187,7 @@ const Evaluate = () => {
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Eye className="h-4 w-4" /> Brightness
                   </div>
-                  <p className="mt-2 font-display text-4xl font-bold">{result.brightness}<span className="text-lg text-muted-foreground">%</span></p>
+                  <p className="mt-2 font-display text-4xl font-bold">{getBrightness(result)}<span className="text-lg text-muted-foreground">%</span></p>
                 </CardContent>
               </Card>
               <Card>
@@ -211,7 +200,7 @@ const Evaluate = () => {
               </Card>
             </div>
 
-            {/* Room photo + preview */}
+            {/* Room photo */}
             {imagePreview && (
               <Card>
                 <CardContent className="pt-6">
@@ -220,131 +209,81 @@ const Evaluate = () => {
               </Card>
             )}
 
-            <Tabs defaultValue="style">
-              <TabsList className="grid w-full grid-cols-4">
-                <TabsTrigger value="style">Style</TabsTrigger>
-                <TabsTrigger value="objects">Objects</TabsTrigger>
-                <TabsTrigger value="metrics">Metrics</TabsTrigger>
-                <TabsTrigger value="tips">Tips</TabsTrigger>
-              </TabsList>
+            {/* Style Matches */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="font-display text-lg">Style Match Scores</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {getStyleScores(result).map((s) => (
+                  <div key={s.style}>
+                    <div className="flex justify-between text-sm">
+                      <span>{s.style}</span>
+                      <span className="text-muted-foreground">{Math.round(s.score * 100)}%</span>
+                    </div>
+                    <Progress value={s.score * 100} className="mt-1 h-2" />
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
 
-              {/* Style Tab */}
-              <TabsContent value="style" className="space-y-6">
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <Card>
-                    <CardHeader><CardTitle className="font-display">Style Traits</CardTitle></CardHeader>
-                    <CardContent className="space-y-3">
-                      {Object.entries(result.style_traits).map(([trait, value]) => (
-                        <div key={trait}>
-                          <div className="flex justify-between text-sm">
-                            <span className="capitalize">{trait.replace(/_/g, " ")}</span>
-                            <span className="text-muted-foreground">{((value as number) * 100).toFixed(0)}%</span>
-                          </div>
-                          <Progress value={(value as number) * 100} className="mt-1 h-2" />
-                        </div>
+            {/* Objects Table */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="font-display text-lg">Detected Objects</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="p-2 text-left font-medium">Object</th>
+                        <th className="p-2 text-left font-medium">Confidence</th>
+                        <th className="p-2 text-left font-medium">Material</th>
+                        <th className="p-2 text-left font-medium">Distance</th>
+                        <th className="p-2 text-left font-medium">Source</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.objects.map((obj, i) => (
+                        <tr key={i} className="border-b border-border/50">
+                          <td className="p-2 capitalize font-medium">{obj.name || (obj as any).label}</td>
+                          <td className="p-2">{(obj.confidence * 100).toFixed(0)}%</td>
+                          <td className="p-2"><Badge variant="secondary" className="capitalize">{obj.material}</Badge></td>
+                          <td className="p-2">{(obj.distance_m ?? (obj as any).distance ?? 0).toFixed(1)}m</td>
+                          <td className="p-2"><Badge variant="outline">{obj.source}</Badge></td>
+                        </tr>
                       ))}
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader><CardTitle className="font-display">Top Style Matches</CardTitle></CardHeader>
-                    <CardContent>
-                      <ResponsiveContainer width="100%" height={250}>
-                        <BarChart data={styleData} layout="vertical">
-                          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                          <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 12 }} />
-                          <YAxis dataKey="name" type="category" width={100} tick={{ fontSize: 12 }} />
-                          <Tooltip />
-                          <Bar dataKey="score" fill="hsl(152,60%,42%)" radius={[0, 4, 4, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </CardContent>
-                  </Card>
+                    </tbody>
+                  </table>
                 </div>
-              </TabsContent>
+              </CardContent>
+            </Card>
 
-              {/* Objects Tab */}
-              <TabsContent value="objects" className="space-y-6">
-                <div className="grid gap-6 lg:grid-cols-3">
-                  <Card className="lg:col-span-2">
-                    <CardHeader><CardTitle className="font-display">Detected Objects</CardTitle></CardHeader>
-                    <CardContent>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="border-b border-border">
-                              <th className="p-2 text-left font-medium">Object</th>
-                              <th className="p-2 text-left font-medium">Confidence</th>
-                              <th className="p-2 text-left font-medium">Material</th>
-                              <th className="p-2 text-left font-medium">Distance</th>
-                              <th className="p-2 text-left font-medium">Source</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {result.objects.map((obj, i) => (
-                              <tr key={i} className="border-b border-border/50">
-                                <td className="p-2 capitalize font-medium">{obj.label}</td>
-                                <td className="p-2">{(obj.confidence * 100).toFixed(0)}%</td>
-                                <td className="p-2"><Badge variant="secondary" className="capitalize">{obj.material}</Badge></td>
-                                <td className="p-2">{obj.distance.toFixed(1)}m</td>
-                                <td className="p-2"><Badge variant="outline">{obj.source}</Badge></td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader><CardTitle className="font-display">Materials</CardTitle></CardHeader>
-                    <CardContent>
-                      <ResponsiveContainer width="100%" height={220}>
-                        <PieChart>
-                          <Pie data={materialData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label>
-                            {materialData.map((_, i) => (
-                              <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                            ))}
-                          </Pie>
-                          <Tooltip />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </CardContent>
-                  </Card>
-                </div>
-              </TabsContent>
+            {/* Depth Map indicator */}
+            {result.depth_map && result.depth_map.length > 0 && (
+              <Card>
+                <CardContent className="flex items-center gap-3 pt-6">
+                  <Layers className="h-5 w-5 text-primary" />
+                  <p className="text-sm font-medium">Depth map available ({result.depth_map.length}×{result.depth_map[0]?.length || 0} pixels)</p>
+                </CardContent>
+              </Card>
+            )}
 
-              {/* Metrics Tab */}
-              <TabsContent value="metrics">
-                <Card>
-                  <CardHeader><CardTitle className="font-display">Design Metrics (13)</CardTitle></CardHeader>
-                  <CardContent className="space-y-3">
-                    {metricsData.map((m) => (
-                      <div key={m.name}>
-                        <div className="flex justify-between text-sm">
-                          <span>{m.name}</span>
-                          <span className="font-medium">{m.value.toFixed(1)}/10</span>
-                        </div>
-                        <Progress value={m.value * 10} className="mt-1 h-2" />
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              {/* Tips Tab */}
-              <TabsContent value="tips">
-                <Card>
-                  <CardHeader><CardTitle className="font-display">AI Recommendations</CardTitle></CardHeader>
-                  <CardContent className="space-y-3">
-                    {result.recommendations.map((tip, i) => (
-                      <div key={i} className="flex gap-3 rounded-lg border border-border bg-muted/30 p-4">
-                        <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                        <p className="text-sm">{tip}</p>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-            </Tabs>
+            {/* Recommendations */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="font-display text-lg">AI Recommendations</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {result.recommendations.map((tip, i) => (
+                  <div key={i} className="flex gap-3 rounded-lg border border-border bg-muted/30 p-4">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <p className="text-sm">{tip}</p>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
           </motion.div>
         )}
       </div>
