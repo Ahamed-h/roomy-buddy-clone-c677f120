@@ -77,34 +77,43 @@ function PointCloud({
   // Load image and sample colors onto points
   useMemo(() => {
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    // Don't set crossOrigin for data URLs - it breaks loading
+    if (!imageUrl.startsWith("data:")) {
+      img.crossOrigin = "anonymous";
+    }
     img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.drawImage(img, 0, 0);
-      const imgData = ctx.getImageData(0, 0, img.width, img.height).data;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0);
+        const imgData = ctx.getImageData(0, 0, img.width, img.height).data;
 
-      const rows = depthMap.length;
-      const cols = depthMap[0]?.length ?? 0;
-      const step = 2;
-      let idx = 0;
+        const rows = depthMap.length;
+        const cols = depthMap[0]?.length ?? 0;
+        const step = 2;
+        let idx = 0;
 
-      for (let r = 0; r < rows; r += step) {
-        for (let c = 0; c < cols; c += step) {
-          // Map depth-map coords to image coords
-          const imgX = Math.floor((c / cols) * img.width);
-          const imgY = Math.floor((r / rows) * img.height);
-          const pixelIdx = (imgY * img.width + imgX) * 4;
-          colors[idx * 3] = imgData[pixelIdx] / 255;
-          colors[idx * 3 + 1] = imgData[pixelIdx + 1] / 255;
-          colors[idx * 3 + 2] = imgData[pixelIdx + 2] / 255;
-          idx++;
+        for (let r = 0; r < rows; r += step) {
+          for (let c = 0; c < cols; c += step) {
+            const imgX = Math.floor((c / cols) * img.width);
+            const imgY = Math.floor((r / rows) * img.height);
+            const pixelIdx = (imgY * img.width + imgX) * 4;
+            colors[idx * 3] = imgData[pixelIdx] / 255;
+            colors[idx * 3 + 1] = imgData[pixelIdx + 1] / 255;
+            colors[idx * 3 + 2] = imgData[pixelIdx + 2] / 255;
+            idx++;
+          }
         }
+        colorsReady.current = true;
+      } catch (e) {
+        console.warn("Could not sample image colors for point cloud:", e);
       }
-      colorsReady.current = true;
+    };
+    img.onerror = () => {
+      console.warn("Failed to load image for point cloud coloring");
     };
     img.src = imageUrl;
     imgRef.current = img;
