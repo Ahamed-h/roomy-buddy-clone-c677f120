@@ -197,6 +197,19 @@ async def generate_repaint(file: UploadFile = File(...), style_prompt: str = For
 
 # ================= INTELLIGENT CHAT =================
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://whlzqtupucxeqkaqmcds.supabase.co")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndobHpxdHVwdWN4ZXFrYXFtY2RzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwMDU4NjUsImV4cCI6MjA4NzU4MTg2NX0.5aheyRHAJPGRZxzzQlQI9WoAWVmjCRMM_5hGxOVqNac")
+
+
+def is_ollama_available():
+    """Quick check if Ollama is reachable."""
+    try:
+        r = requests.get(OLLAMA_URL, timeout=2)
+        return r.ok
+    except Exception:
+        return False
+
+
 def chat_with_ollama(prompt):
     """Send prompt to TinyLlama via Ollama and return raw text."""
     response = requests.post(
@@ -209,9 +222,61 @@ def chat_with_ollama(prompt):
     return response.json()["response"]
 
 
-def intelligent_chat(message, analysis_result=None):
-    """Chat with structured JSON output + analysis context."""
+def chat_with_supabase(message, room_context=None):
+    """Fallback: call Supabase design-chat edge function (Lovable AI)."""
+    url = f"{SUPABASE_URL}/functions/v1/design-chat"
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+    }
+    body = {
+        "messages": [{"role": "user", "content": message}],
+    }
+    if room_context:
+        body["roomContext"] = room_context
 
+    response = requests.post(url, json=body, headers=headers, timeout=30)
+
+    if response.status_code != 200:
+        raise Exception(f"Supabase edge function error: {response.status_code}")
+
+    # Edge function returns SSE stream — collect full response
+    full_text = ""
+    for line in response.text.split("\n"):
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        if data_str == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data_str)
+            delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            full_text += delta
+        except Exception:
+            continue
+
+    return full_text
+
+
+def parse_structured_output(raw_output):
+    """Try to parse JSON from AI output, with fallback."""
+    import re
+    try:
+        return json.loads(raw_output)
+    except Exception:
+        match = re.search(r'\{.*\}', raw_output, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except Exception:
+                pass
+    return {"reply": raw_output, "action": "none", "style_prompt": ""}
+
+
+def build_chat_prompt(message, analysis_result=None):
+    """Build the system + context + user prompt."""
     system_prompt = """You are an interior design AI assistant.
 
 You MUST return valid JSON in this format:
@@ -228,31 +293,39 @@ Rules:
 - style_prompt must be optimized for Stable Diffusion
 - Always return valid JSON only, no extra text
 """
-
     context = ""
     if analysis_result:
         context = f"\nRoom Analysis:\n{json.dumps(analysis_result)}\n"
 
-    full_prompt = f"{system_prompt}\n{context}\nUser: {message}\nAssistant:"
+    return f"{system_prompt}\n{context}\nUser: {message}\nAssistant:"
 
-    raw_output = chat_with_ollama(full_prompt)
 
-    # Parse JSON safely
+def intelligent_chat(message, analysis_result=None):
+    """Chat with structured JSON output. Ollama first, Lovable AI fallback."""
+
+    # Strategy 1: Local Ollama (TinyLlama)
+    if is_ollama_available():
+        try:
+            print("💬 Chat via Ollama (TinyLlama)")
+            full_prompt = build_chat_prompt(message, analysis_result)
+            raw_output = chat_with_ollama(full_prompt)
+            return parse_structured_output(raw_output)
+        except Exception as e:
+            print(f"⚠️ Ollama failed: {e}, falling back to Lovable AI...")
+
+    # Strategy 2: Supabase edge function (Lovable AI / Gemini / OpenAI)
     try:
-        parsed = json.loads(raw_output)
-    except Exception:
-        # Try to extract JSON from mixed output
-        import re
-        match = re.search(r'\{.*\}', raw_output, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group())
-            except Exception:
-                parsed = {"reply": raw_output, "action": "none", "style_prompt": ""}
-        else:
-            parsed = {"reply": raw_output, "action": "none", "style_prompt": ""}
+        print("💬 Chat via Lovable AI (Supabase edge function)")
+        # Build context-aware message
+        context_msg = message
+        if analysis_result:
+            context_msg = f"Room context: {json.dumps(analysis_result)}\n\nUser request: {message}\n\nRespond with JSON: {{\"reply\": \"...\", \"action\": \"none|generate\", \"style_prompt\": \"...\"}}"
 
-    return parsed
+        raw_output = chat_with_supabase(context_msg, analysis_result)
+        return parse_structured_output(raw_output)
+    except Exception as e:
+        print(f"❌ Lovable AI also failed: {e}")
+        return {"reply": f"All chat providers offline. Error: {str(e)}", "action": "none", "style_prompt": ""}
 
 
 @app.post("/design/chat")
@@ -265,15 +338,7 @@ async def design_chat(
 
     analysis_data = LAST_ANALYSIS if include_analysis else None
 
-    try:
-        decision = intelligent_chat(message, analysis_data)
-    except Exception as e:
-        # Fallback if Ollama is not running
-        return {
-            "response": f"Chat offline — Ollama not reachable. Error: {str(e)}",
-            "action": "none",
-            "style_prompt": ""
-        }
+    decision = intelligent_chat(message, analysis_data)
 
     # Auto-trigger ComfyUI generation
     if decision.get("action") == "generate" and decision.get("style_prompt") and LAST_IMAGE_PATH:
