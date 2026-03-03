@@ -14,7 +14,7 @@ serve(async (req) => {
   }
 
   try {
-    const { analysisData, aiSuggestions, userSuggestions, imageBase64 } = await req.json();
+    const { analysisData, aiSuggestions, userSuggestions } = await req.json();
     
     if (!analysisData) {
       return new Response(JSON.stringify({ error: "analysisData is required" }), {
@@ -35,14 +35,8 @@ serve(async (req) => {
     const aiRecsList = (aiSuggestions || []).map((s: string) => `- ${s}`).join("\n");
     const userReqs = userSuggestions || "";
 
-    console.log("Generating floorplan with:", {
-      roomCount: rooms.length,
-      aiSuggestionCount: (aiSuggestions || []).length,
-      hasUserSuggestions: !!userReqs,
-      hasImage: !!imageBase64,
-    });
-
-    // Step 1: Generate refined prompt via Gemini chat
+    // Use Gemini text model to generate a detailed textual floorplan description
+    // (actual image generation must happen via local ComfyUI)
     const promptResponse = await fetch(GEMINI_URL, {
       method: "POST",
       headers: {
@@ -54,14 +48,11 @@ serve(async (req) => {
         messages: [
           {
             role: "system",
-            content: `You are an architectural floor plan designer. Create a concise image generation prompt for a redesigned floor plan.
-The prompt should describe a clean, professional 2D architectural floor plan drawing with labeled rooms.
-Keep it under 200 words. Focus on layout, room sizes, and spatial relationships.
-Return ONLY the prompt text, nothing else.`
+            content: `You are an architectural floor plan designer. Given the current layout and suggestions, describe a detailed redesigned floor plan in text. Include room positions, dimensions, and spatial relationships. Be specific about improvements made.`
           },
           {
             role: "user",
-            content: `Create an image prompt for this redesigned floor plan:
+            content: `Redesign this floor plan:
 
 CURRENT ROOMS: ${roomDescriptions}
 TOTAL AREA: ${analysisData.totalArea || "unknown"} sq ft
@@ -73,7 +64,7 @@ ${aiRecsList || "None selected"}
 USER REQUIREMENTS:
 ${userReqs || "None specified"}
 
-Generate a prompt for a clean, professional architectural floor plan that incorporates these changes.`
+Provide a detailed text description of the improved floor plan layout.`
           }
         ],
       }),
@@ -81,78 +72,25 @@ Generate a prompt for a clean, professional architectural floor plan that incorp
 
     if (!promptResponse.ok) {
       const errText = await promptResponse.text();
-      console.error("Prompt generation failed:", promptResponse.status, errText);
+      console.error("Gemini text generation failed:", promptResponse.status, errText);
       if (promptResponse.status === 429) {
         return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), {
           status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      throw new Error("Failed to generate prompt");
+      throw new Error("Failed to generate floorplan description");
     }
 
     const promptData = await promptResponse.json();
-    const enhancedPrompt = promptData.choices?.[0]?.message?.content || 
-      `Professional 2D architectural floor plan with ${rooms.length} rooms: ${roomDescriptions}. Clean lines, labeled rooms, dimensions shown.`;
-    
-    console.log("Enhanced prompt:", enhancedPrompt.substring(0, 200));
+    const description = promptData.choices?.[0]?.message?.content || "No description generated.";
 
-    // Step 2: Generate image via Gemini image model
-    const imageMessages: any[] = [];
-    
-    if (imageBase64) {
-      imageMessages.push({
-        role: "user",
-        content: [
-          { type: "text", text: `Redesign this floor plan: ${enhancedPrompt}` },
-          { type: "image_url", image_url: { url: imageBase64.startsWith("data:") ? imageBase64 : `data:image/png;base64,${imageBase64}` } },
-        ],
-      });
-    } else {
-      imageMessages.push({
-        role: "user",
-        content: `Generate a professional 2D architectural floor plan: ${enhancedPrompt}`,
-      });
-    }
-
-    const imageResponse = await fetch(GEMINI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GEMINI_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gemini-2.5-flash-image-generation",
-        messages: imageMessages,
-        modalities: ["image", "text"],
-      }),
-    });
-
-    if (!imageResponse.ok) {
-      const errText = await imageResponse.text();
-      console.error("Image generation failed:", imageResponse.status, errText);
-      if (imageResponse.status === 429) {
-        return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), {
-          status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      throw new Error("Image generation failed");
-    }
-
-    const imageData = await imageResponse.json();
-    const generatedImage = imageData.choices?.[0]?.message?.images?.[0]?.image_url?.url;
-    const description = imageData.choices?.[0]?.message?.content || "";
-
-    if (!generatedImage) {
-      console.error("No image in response:", JSON.stringify(imageData).substring(0, 500));
-      throw new Error("AI did not generate an image. Try simplifying your requirements.");
-    }
-
-    console.log("Image generated successfully, description length:", description.length);
-
+    // Return text description only — image generation requires local ComfyUI
     return new Response(JSON.stringify({
-      image_url: generatedImage,
+      image_url: null,
       description,
-      prompt_used: enhancedPrompt,
+      prompt_used: `Redesigned floorplan for ${rooms.length} rooms`,
+      fallback: "comfyui",
+      message: "Image generation requires local ComfyUI. Use the local FastAPI backend for visual output.",
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

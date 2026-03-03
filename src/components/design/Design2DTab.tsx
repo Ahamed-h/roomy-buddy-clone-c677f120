@@ -254,35 +254,9 @@ const Design2DTab = () => {
         }
       } catch {}
 
-      // Try direct API
-      setPipelineStep("Generating (direct API)...");
-      const b64 = imageBase64 || await fileToBase64(currentImage);
-
-      if (hasDirectKeys()) {
-        try {
-          const result = await directGenerateImage(prompt, b64);
-          if (result?.image_url) {
-            setGeneratedImageUrl(result.image_url);
-            addMessage("ai", "Here's your **AI-generated** redesign! 👇 Want any changes?", result.image_url);
-            return;
-          }
-        } catch (err) {
-          console.warn("Direct API image gen failed, trying Supabase:", err);
-        }
-      }
-
-      // Fallback to Supabase edge function
-      setPipelineStep("Generating (cloud)...");
-      const { data, error } = await supabase.functions.invoke("generate-image", {
-        body: { prompt, imageBase64: b64 },
-      });
-      if (error) throw error;
-      if (data?.image_url) {
-        setGeneratedImageUrl(data.image_url);
-        addMessage("ai", "Here's your **AI-generated** redesign! 👇 Want any changes?", data.image_url);
-      } else {
-        addMessage("ai", "❌ Generation didn't produce a result. Try different themes.");
-      }
+      // ComfyUI is the only image generation backend
+      // Both local endpoints failed — inform the user
+      addMessage("ai", "❌ Image generation requires **ComfyUI** running locally. Please start ComfyUI at `localhost:8188` and the FastAPI backend at `localhost:8000`, then try again.\n\nSee SETUP.md for instructions.");
     } catch (err: any) {
       addMessage("ai", `❌ Generation failed: ${err.message}`);
     } finally {
