@@ -107,8 +107,7 @@ const Design = () => {
               <Paintbrush className="h-4 w-4" /> 2D Design Generation
             </TabsTrigger>
             <TabsTrigger value="3d" className="gap-2 data-[state=active]:bg-primary/20 data-[state=active]:text-primary">
-              <Box className="h-4 w-4" /> 3D Design
-              <span className="ml-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">Soon</span>
+              <Box className="h-4 w-4" /> Floor Plan Analyzer
             </TabsTrigger>
           </TabsList>
 
