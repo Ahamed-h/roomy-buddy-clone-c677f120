@@ -241,6 +241,8 @@ const FloorplanEditor: React.FC<Props> = ({
             const isSelected = selectedId === item.id;
             const fillColor = getFurnitureColor(item.type, isSelected);
             const strokeColor = getFurnitureStroke(item.type, isSelected);
+            const renderW = Math.max(item.width * SCALE, 18);
+            const renderH = Math.max(item.depth * SCALE, 18);
 
             return (
               <Group
@@ -254,10 +256,10 @@ const FloorplanEditor: React.FC<Props> = ({
                 onClick={() => onSelectItem(item.id)}
               >
                 <Rect
-                  width={item.width * SCALE}
-                  height={item.depth * SCALE}
-                  offsetX={(item.width * SCALE) / 2}
-                  offsetY={(item.depth * SCALE) / 2}
+                  width={renderW}
+                  height={renderH}
+                  offsetX={renderW / 2}
+                  offsetY={renderH / 2}
                   fill={fillColor}
                   stroke={strokeColor}
                   strokeWidth={2}
@@ -265,17 +267,17 @@ const FloorplanEditor: React.FC<Props> = ({
                   opacity={0.8}
                   dash={item.type === "window" ? [4, 4] : undefined}
                 />
+                {/* Label above the item so it never gets clipped */}
                 <Text
                   text={item.label}
-                  fontSize={10}
+                  fontSize={11}
                   fontFamily="Inter"
-                  fill="#e4e4e7"
+                  fontStyle="bold"
+                  fill={isSelected ? "#93c5fd" : "#e4e4e7"}
                   align="center"
-                  verticalAlign="middle"
-                  width={item.width * SCALE}
-                  height={item.depth * SCALE}
-                  offsetX={(item.width * SCALE) / 2}
-                  offsetY={(item.depth * SCALE) / 2}
+                  width={Math.max(renderW, 80)}
+                  offsetX={Math.max(renderW, 80) / 2}
+                  y={-renderH / 2 - 14}
                 />
               </Group>
             );
