@@ -49,56 +49,62 @@ Rules:
 - Only identify rooms clearly delimited by walls, labels or boundaries in the image
 - Do NOT invent rooms that are not visible
 - Every recommendation roomChange must reference a real room id from the rooms array
+- type must be one of: Living Room, Bedroom, Kitchen, Bathroom, Dining Room, Office, Hallway, Garage, Laundry, Storage, Balcony, Unknown
 - score is 0–10 based on: flow efficiency, natural light, privacy zoning, storage, space utilisation
 - impact must be "high", "medium", or "low"`;
 
 function parseJSON(raw: string): any {
   const clean = raw.replace(/^```(?:json)?\s*/m, "").replace(/\s*```\s*$/m, "").trim();
-  // Try direct parse first
   try { return JSON.parse(clean); } catch {}
-  // Try extracting JSON object
   const match = clean.match(/\{[\s\S]*\}/);
   if (match) return JSON.parse(match[0]);
   throw new Error("Could not parse AI response as JSON");
 }
 
+function isFloorPlanAnalysis(data: any): boolean {
+  return data?.rooms && Array.isArray(data.rooms) && data.rooms.length > 0 &&
+    typeof data.rooms[0].x === "number" && typeof data.rooms[0].width === "number";
+}
+
 export async function analyzeFloorplan(imageBase64: string): Promise<FloorPlanAnalysis> {
   const prompt = ANALYSIS_PROMPT + "\n\nAnalyse this floor plan. Respond only with the JSON object.";
 
-  // Try Ollama first
+  // Try Ollama first (local)
   const ollamaOnline = await isOllamaAvailable();
   if (ollamaOnline) {
     try {
       const raw = await ollamaVision(prompt, imageBase64);
-      return parseJSON(raw);
+      const result = parseJSON(raw);
+      if (isFloorPlanAnalysis(result)) return result;
+      console.warn("Ollama returned unexpected format, trying next provider");
     } catch (err) {
       console.warn("Ollama floorplan analysis failed:", err);
     }
   }
 
-  // Try direct API (Gemini/OpenAI)
+  // Try direct API (Gemini/OpenAI from browser)
   if (hasDirectKeys()) {
     try {
       const raw = await directVision(prompt, imageBase64);
-      return parseJSON(raw);
+      const result = parseJSON(raw);
+      if (isFloorPlanAnalysis(result)) return result;
+      console.warn("Direct API returned unexpected format, trying next provider");
     } catch (err) {
       console.warn("Direct API floorplan analysis failed:", err);
     }
   }
 
-  // Fallback to Supabase edge function
+  // Fallback to Supabase edge function with format=floorplan-analysis
   const rawB64 = imageBase64.replace(/^data:image\/[^;]+;base64,/, "");
   const { data, error } = await supabase.functions.invoke("analyze-floorplan", {
-    body: { imageBase64: rawB64 },
+    body: { imageBase64: rawB64, format: "floorplan-analysis" },
   });
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
   
-  // Edge function returns wall/furniture format, not room format - need to handle
-  // If it already has rooms array, use it directly
-  if (data?.rooms) return data as FloorPlanAnalysis;
+  if (isFloorPlanAnalysis(data)) return data as FloorPlanAnalysis;
   
-  throw new Error("Analysis returned unexpected format. Please try with a Gemini API key in settings.");
+  throw new Error("Analysis returned unexpected format. Please configure a Gemini API key in settings or try again.");
 }
 
 export function applyRecommendations(
