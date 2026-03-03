@@ -15,19 +15,16 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
   try {
     console.log("Trying RasterScan HF Space...");
 
-    // Step 1: Submit job via Gradio API
     const rawBase64 = imageBase64.startsWith("data:")
       ? imageBase64.split(",")[1]
       : imageBase64;
 
-    // Convert base64 to binary and upload as file
     const binaryStr = atob(rawBase64);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
 
-    // Upload file to Gradio
     const formData = new FormData();
     formData.append("files", new Blob([bytes], { type: "image/png" }), "floorplan.png");
 
@@ -45,7 +42,6 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
     const filePath = uploadedFiles[0];
     console.log("RasterScan file uploaded:", filePath);
 
-    // Step 2: Call the /run prediction endpoint
     const predictRes = await fetch(`${RASTERSCAN_GRADIO_URL}/gradio_api/call/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -62,7 +58,6 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
     const { event_id } = await predictRes.json();
     console.log("RasterScan job submitted, event_id:", event_id);
 
-    // Step 3: Poll for result via SSE stream
     const resultRes = await fetch(
       `${RASTERSCAN_GRADIO_URL}/gradio_api/call/run/${event_id}`
     );
@@ -72,18 +67,15 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
       return null;
     }
 
-    // Read SSE stream
     const reader = resultRes.body.getReader();
     const decoder = new TextDecoder();
     let fullText = "";
-    const timeout = Date.now() + 120_000; // 2 min timeout
+    const timeout = Date.now() + 120_000;
 
     while (Date.now() < timeout) {
       const { done, value } = await reader.read();
       if (done) break;
       fullText += decoder.decode(value, { stream: true });
-
-      // Check for completed event
       if (fullText.includes("event: complete")) break;
       if (fullText.includes("event: error")) {
         console.error("RasterScan returned error event");
@@ -91,7 +83,6 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
       }
     }
 
-    // Parse the SSE data
     const dataMatch = fullText.match(/data:\s*(\[[\s\S]*?\])\s*(?:\n|$)/);
     if (!dataMatch) {
       console.error("RasterScan: no data in SSE response");
@@ -99,8 +90,6 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
     }
 
     const resultData = JSON.parse(dataMatch[1]);
-    // resultData = [output_image, json_result]
-    // json_result has { doors, walls, rooms, area, perimeter }
     const rasterResult = resultData[1];
 
     if (!rasterResult || (!rasterResult.walls && !rasterResult.rooms)) {
@@ -116,84 +105,215 @@ async function tryRasterScan(imageBase64: string): Promise<any | null> {
   }
 }
 
-function normalizeRasterScanResult(rs: any) {
-  // RasterScan returns pixel-coordinate data. We normalize to meters.
-  // Their walls are arrays of coordinate segments, rooms have polygon data.
-  // We do best-effort mapping to our schema.
-
-  const walls: any[] = [];
-  const furniture: any[] = [];
+// Convert RasterScan result to FloorPlanAnalysis format (percentage-based rooms)
+function rasterScanToFloorPlanAnalysis(rs: any, imageWidth: number, imageHeight: number): any {
   const rooms: any[] = [];
+  const roomTypeGuesses = ["Living Room", "Bedroom", "Kitchen", "Bathroom", "Dining Room", "Office", "Hallway", "Storage", "Laundry", "Balcony", "Garage", "Unknown"];
 
-  // Process walls - RasterScan returns wall segments
-  if (Array.isArray(rs.walls)) {
-    rs.walls.forEach((w: any, i: number) => {
-      if (w.start && w.end) {
-        // Already in {start, end} format
-        walls.push({
-          id: `w-rs-${i}`,
-          start: { x: (w.start.x || 0) / 100, y: (w.start.y || 0) / 100 },
-          end: { x: (w.end.x || 0) / 100, y: (w.end.y || 0) / 100 },
-          thickness: 0.15,
-        });
-      } else if (Array.isArray(w) && w.length >= 4) {
-        // [x1, y1, x2, y2] format
-        walls.push({
-          id: `w-rs-${i}`,
-          start: { x: w[0] / 100, y: w[1] / 100 },
-          end: { x: w[2] / 100, y: w[3] / 100 },
-          thickness: 0.15,
-        });
-      }
-    });
-  }
-
-  // Process doors
-  if (Array.isArray(rs.doors)) {
-    rs.doors.forEach((d: any, i: number) => {
-      const pos = d.position || d.center || { x: 0, y: 0 };
-      furniture.push({
-        id: `d-rs-${i}`,
-        type: "door",
-        label: `Door (${d.type || "single"})`,
-        position: { x: (pos.x || 0) / 100, y: (pos.y || 0) / 100 },
-        rotation: d.rotation || 0,
-        width: (d.width || 90) / 100,
-        depth: 0.1,
-        height: 2.1,
-      });
-    });
-  }
-
-  // Process rooms
   if (Array.isArray(rs.rooms)) {
     rs.rooms.forEach((r: any, i: number) => {
-      const center = r.center || r.position || { x: 0, y: 0 };
+      // RasterScan rooms may have bbox [x1, y1, x2, y2] in pixels
+      let x = 0, y = 0, width = 20, height = 15;
+
+      if (r.bbox && Array.isArray(r.bbox) && r.bbox.length >= 4) {
+        x = (r.bbox[0] / imageWidth) * 100;
+        y = (r.bbox[1] / imageHeight) * 100;
+        width = ((r.bbox[2] - r.bbox[0]) / imageWidth) * 100;
+        height = ((r.bbox[3] - r.bbox[1]) / imageHeight) * 100;
+      } else if (r.center) {
+        // Estimate a room rectangle from center
+        x = ((r.center.x || 0) / imageWidth) * 100 - 10;
+        y = ((r.center.y || 0) / imageHeight) * 100 - 7.5;
+        width = 20;
+        height = 15;
+      } else if (r.contour && Array.isArray(r.contour) && r.contour.length > 0) {
+        // Derive bbox from contour points
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const pt of r.contour) {
+          const px = Array.isArray(pt) ? pt[0] : pt.x || 0;
+          const py = Array.isArray(pt) ? pt[1] : pt.y || 0;
+          minX = Math.min(minX, px);
+          minY = Math.min(minY, py);
+          maxX = Math.max(maxX, px);
+          maxY = Math.max(maxY, py);
+        }
+        x = (minX / imageWidth) * 100;
+        y = (minY / imageHeight) * 100;
+        width = ((maxX - minX) / imageWidth) * 100;
+        height = ((maxY - minY) / imageHeight) * 100;
+      }
+
+      const roomName = r.name || r.type || r.label || roomTypeGuesses[i % roomTypeGuesses.length];
+      const roomType = matchRoomType(roomName);
+      const sqFt = Math.round((width / 100) * (height / 100) * 1500); // rough estimate
+
       rooms.push({
-        id: `r-rs-${i}`,
-        name: r.name || r.type || `Room ${i + 1}`,
-        center: { x: (center.x || 0) / 100, y: (center.y || 0) / 100 },
+        id: `r${i}`,
+        type: roomType,
+        label: roomName,
+        estimatedSqFt: sqFt,
+        x: Math.max(0, Math.round(x * 10) / 10),
+        y: Math.max(0, Math.round(y * 10) / 10),
+        width: Math.max(5, Math.round(width * 10) / 10),
+        height: Math.max(5, Math.round(height * 10) / 10),
+        notes: "",
       });
     });
   }
 
-  // Estimate dimensions from wall extents
-  let maxX = 10, maxY = 10;
-  walls.forEach((w) => {
-    maxX = Math.max(maxX, w.start.x, w.end.x);
-    maxY = Math.max(maxY, w.start.y, w.end.y);
-  });
+  const totalArea = rooms.reduce((sum, r) => sum + r.estimatedSqFt, 0);
+  const doorCount = Array.isArray(rs.doors) ? rs.doors.length : 0;
 
   return {
-    walls,
-    furniture,
     rooms,
-    dimensions: { width: maxX + 0.5, height: maxY + 0.5 },
+    totalArea,
+    score: Math.min(10, Math.max(1, 5 + rooms.length * 0.3)),
+    summary: `Detected ${rooms.length} rooms with ${doorCount} doors via computer vision analysis.`,
+    insights: [
+      { type: "positive", text: `${rooms.length} rooms clearly identified in the floor plan` },
+      ...(doorCount > 0 ? [{ type: "positive", text: `${doorCount} doors detected` }] : []),
+      ...(rooms.length < 3 ? [{ type: "warning", text: "Few rooms detected — some may be missed" }] : []),
+    ],
+    flowIssues: [],
+    recommendations: [],
     source: "rasterscan",
   };
 }
 
-// ─── AI Vision Fallback ─────────────────────────────────────────────────
+function matchRoomType(name: string): string {
+  const n = name.toLowerCase();
+  if (n.includes("living") || n.includes("lounge")) return "Living Room";
+  if (n.includes("bed")) return "Bedroom";
+  if (n.includes("kitchen")) return "Kitchen";
+  if (n.includes("bath") || n.includes("toilet") || n.includes("wc")) return "Bathroom";
+  if (n.includes("dining")) return "Dining Room";
+  if (n.includes("office") || n.includes("study")) return "Office";
+  if (n.includes("hall") || n.includes("corridor") || n.includes("passage")) return "Hallway";
+  if (n.includes("garage") || n.includes("parking")) return "Garage";
+  if (n.includes("laundry") || n.includes("utility")) return "Laundry";
+  if (n.includes("storage") || n.includes("closet") || n.includes("store")) return "Storage";
+  if (n.includes("balcony") || n.includes("terrace") || n.includes("patio")) return "Balcony";
+  return "Unknown";
+}
+
+// ─── Lovable AI Vision (returns FloorPlanAnalysis format directly) ──────
+
+const FLOORPLAN_ANALYSIS_PROMPT = `You are a senior architectural space planner. Analyse the uploaded floor plan image carefully.
+
+Return ONLY a single valid JSON object — no markdown, no explanation, nothing else.
+
+Schema:
+{
+  "rooms": [
+    {
+      "id": "r0",
+      "type": "Living Room",
+      "label": "Living Room",
+      "estimatedSqFt": 220,
+      "x": 5,
+      "y": 8,
+      "width": 30,
+      "height": 25,
+      "notes": "Open plan, south-facing"
+    }
+  ],
+  "totalArea": 1400,
+  "score": 7.2,
+  "summary": "Compact 2BR apartment with efficient layout",
+  "insights": [
+    { "type": "positive", "text": "Good separation of wet and dry zones" },
+    { "type": "warning",  "text": "Bedroom 2 has no direct natural light" },
+    { "type": "negative", "text": "Kitchen triangle inefficient" }
+  ],
+  "flowIssues": ["Living room acts as through-corridor to bedrooms"],
+  "recommendations": [
+    {
+      "id": "rec1",
+      "title": "Enlarge Kitchen",
+      "description": "Extend kitchen 4 ft east",
+      "impact": "high",
+      "roomChanges": [
+        { "id": "r2", "width": 22, "height": 18, "notes": "Expanded kitchen" }
+      ]
+    }
+  ]
+}
+
+Rules:
+- x, y, width, height are PERCENTAGES (0–100) of the image dimensions
+- Only identify rooms clearly visible in the image
+- Do NOT invent rooms that are not visible
+- Every recommendation roomChange must reference a real room id
+- score is 0–10
+- type must be one of: Living Room, Bedroom, Kitchen, Bathroom, Dining Room, Office, Hallway, Garage, Laundry, Storage, Balcony, Unknown
+- impact must be "high", "medium", or "low"`;
+
+async function tryLovableAIVision(imageBase64: string): Promise<any | null> {
+  const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+  if (!LOVABLE_API_KEY) {
+    console.log("No LOVABLE_API_KEY, skipping Lovable AI vision");
+    return null;
+  }
+
+  try {
+    console.log("Trying Lovable AI vision analysis...");
+    const imageUrl = imageBase64.startsWith("data:")
+      ? imageBase64
+      : `data:image/png;base64,${imageBase64}`;
+
+    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          { role: "system", content: FLOORPLAN_ANALYSIS_PROMPT },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Analyze this floor plan image. Return only the JSON object." },
+              { type: "image_url", image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("Lovable AI vision failed:", response.status, await response.text());
+      return null;
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    console.log("Lovable AI vision raw length:", content.length);
+
+    // Parse JSON from response
+    let jsonStr = content;
+    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+    if (!jsonStr.startsWith("{")) {
+      const braceMatch = jsonStr.match(/\{[\s\S]*\}/);
+      if (braceMatch) jsonStr = braceMatch[0];
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    if (parsed.rooms && Array.isArray(parsed.rooms)) {
+      parsed.source = "lovable-ai";
+      console.log(`Lovable AI: ${parsed.rooms.length} rooms, score: ${parsed.score}`);
+      return parsed;
+    }
+    return null;
+  } catch (err) {
+    console.error("Lovable AI vision error:", err);
+    return null;
+  }
+}
+
+// ─── Legacy AI Vision Fallback (Gemini/OpenAI direct) ───────────────────
 
 const SYSTEM_PROMPT = `You are an expert architectural floor plan analyzer. Analyze the provided floor plan image and extract ALL structural and furniture elements with precise coordinates.
 
@@ -290,23 +410,163 @@ async function callAI(providers: AIProvider[], messages: any[]): Promise<any> {
   throw new Error("All AI providers failed");
 }
 
-function parseAIResult(imageBase64: string, providers: AIProvider[]) {
-  const imageUrl = imageBase64.startsWith("data:")
-    ? imageBase64
-    : `data:image/png;base64,${imageBase64}`;
+// ─── Main Handler ───────────────────────────────────────────────────────
 
-  const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: "Analyze this floor plan. Extract every wall, door, window, furniture item, and room." },
-        { type: "image_url", image_url: { url: imageUrl } },
-      ],
-    },
-  ];
+serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
+  }
 
-  return callAI(providers, messages);
+  try {
+    const { imageBase64, imageWidth, imageHeight, format } = await req.json();
+    if (!imageBase64) {
+      return new Response(JSON.stringify({ error: "imageBase64 is required" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // New: if format=floorplan-analysis, return FloorPlanAnalysis format directly
+    const wantFloorPlanFormat = format === "floorplan-analysis";
+    const imgW = imageWidth || 2000;
+    const imgH = imageHeight || 1500;
+
+    // ── Strategy 1: RasterScan (free CV model) → convert to FloorPlanAnalysis ──
+    const rsResult = await tryRasterScan(imageBase64);
+    if (rsResult) {
+      if (wantFloorPlanFormat) {
+        const analysis = rasterScanToFloorPlanAnalysis(rsResult, imgW, imgH);
+        console.log(`RasterScan → FloorPlanAnalysis: ${analysis.rooms.length} rooms`);
+        return new Response(JSON.stringify(analysis), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      // Legacy format
+      const normalized = normalizeRasterScanLegacy(rsResult);
+      console.log(`RasterScan legacy: ${normalized.walls.length} walls, ${normalized.rooms.length} rooms`);
+      return new Response(JSON.stringify(normalized), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ── Strategy 2: Lovable AI Vision (FloorPlanAnalysis format) ──
+    if (wantFloorPlanFormat) {
+      const lovableResult = await tryLovableAIVision(imageBase64);
+      if (lovableResult) {
+        return new Response(JSON.stringify(lovableResult), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    // ── Strategy 3: Direct AI Vision (Gemini → OpenAI, legacy format) ──
+    console.log("Falling back to direct AI vision...");
+    const providers = getProviders();
+    if (providers.length === 0) {
+      throw new Error("No analyzers available. RasterScan failed and no AI API keys configured.");
+    }
+
+    const imageUrl = imageBase64.startsWith("data:")
+      ? imageBase64
+      : `data:image/png;base64,${imageBase64}`;
+
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Analyze this floor plan. Extract every wall, door, window, furniture item, and room." },
+          { type: "image_url", image_url: { url: imageUrl } },
+        ],
+      },
+    ];
+
+    const aiResult = await callAI(providers, messages);
+    const content = aiResult.choices?.[0]?.message?.content || "";
+    console.log("AI raw response length:", content.length);
+
+    const result = normalizeAIResult(content);
+    console.log(`AI Vision: ${result.walls.length} walls, ${result.rooms.length} rooms`);
+
+    return new Response(JSON.stringify(result), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    console.error("analyze-floorplan error:", e);
+    return new Response(
+      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+});
+
+// ─── Legacy format normalizers ──────────────────────────────────────────
+
+function normalizeRasterScanLegacy(rs: any) {
+  const walls: any[] = [];
+  const furniture: any[] = [];
+  const rooms: any[] = [];
+
+  if (Array.isArray(rs.walls)) {
+    rs.walls.forEach((w: any, i: number) => {
+      if (w.start && w.end) {
+        walls.push({
+          id: `w-rs-${i}`,
+          start: { x: (w.start.x || 0) / 100, y: (w.start.y || 0) / 100 },
+          end: { x: (w.end.x || 0) / 100, y: (w.end.y || 0) / 100 },
+          thickness: 0.15,
+        });
+      } else if (Array.isArray(w) && w.length >= 4) {
+        walls.push({
+          id: `w-rs-${i}`,
+          start: { x: w[0] / 100, y: w[1] / 100 },
+          end: { x: w[2] / 100, y: w[3] / 100 },
+          thickness: 0.15,
+        });
+      }
+    });
+  }
+
+  if (Array.isArray(rs.doors)) {
+    rs.doors.forEach((d: any, i: number) => {
+      const pos = d.position || d.center || { x: 0, y: 0 };
+      furniture.push({
+        id: `d-rs-${i}`,
+        type: "door",
+        label: `Door (${d.type || "single"})`,
+        position: { x: (pos.x || 0) / 100, y: (pos.y || 0) / 100 },
+        rotation: d.rotation || 0,
+        width: (d.width || 90) / 100,
+        depth: 0.1,
+        height: 2.1,
+      });
+    });
+  }
+
+  if (Array.isArray(rs.rooms)) {
+    rs.rooms.forEach((r: any, i: number) => {
+      const center = r.center || r.position || { x: 0, y: 0 };
+      rooms.push({
+        id: `r-rs-${i}`,
+        name: r.name || r.type || `Room ${i + 1}`,
+        center: { x: (center.x || 0) / 100, y: (center.y || 0) / 100 },
+      });
+    });
+  }
+
+  let maxX = 10, maxY = 10;
+  walls.forEach((w) => {
+    maxX = Math.max(maxX, w.start.x, w.end.x);
+    maxY = Math.max(maxY, w.start.y, w.end.y);
+  });
+
+  return {
+    walls,
+    furniture,
+    rooms,
+    dimensions: { width: maxX + 0.5, height: maxY + 0.5 },
+    source: "rasterscan",
+  };
 }
 
 function normalizeAIResult(content: string) {
@@ -319,7 +579,6 @@ function normalizeAIResult(content: string) {
   }
 
   const parsed = JSON.parse(jsonStr);
-
   const unit = parsed.unit || "meters";
   const toMeters = unit === "feet" ? 0.3048 : 1;
 
@@ -383,55 +642,3 @@ function normalizeAIResult(content: string) {
   const allFurniture = [...furniture, ...doors, ...windows];
   return { walls, furniture: allFurniture, rooms, dimensions, source: "ai-vision" };
 }
-
-// ─── Main Handler ───────────────────────────────────────────────────────
-
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
-
-  try {
-    const { imageBase64 } = await req.json();
-    if (!imageBase64) {
-      return new Response(JSON.stringify({ error: "imageBase64 is required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // ── Strategy 1: RasterScan (free, dedicated CV model) ──
-    const rsResult = await tryRasterScan(imageBase64);
-    if (rsResult) {
-      const normalized = normalizeRasterScanResult(rsResult);
-      console.log(`RasterScan: ${normalized.walls.length} walls, ${normalized.rooms.length} rooms`);
-      return new Response(JSON.stringify(normalized), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // ── Strategy 2: AI Vision (Gemini → OpenAI) ──
-    console.log("RasterScan unavailable, falling back to AI vision...");
-    const providers = getProviders();
-    if (providers.length === 0) {
-      throw new Error("No analyzers available. RasterScan failed and no AI API keys configured.");
-    }
-
-    const aiResult = await parseAIResult(imageBase64, providers);
-    const content = aiResult.choices?.[0]?.message?.content || "";
-    console.log("AI raw response length:", content.length);
-
-    const result = normalizeAIResult(content);
-    console.log(`AI Vision: ${result.walls.length} walls, ${result.rooms.length} rooms`);
-
-    return new Response(JSON.stringify(result), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  } catch (e) {
-    console.error("analyze-floorplan error:", e);
-    return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  }
-});
