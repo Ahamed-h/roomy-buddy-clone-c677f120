@@ -2,9 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
   SelectContent,
@@ -22,11 +20,15 @@ import {
   Bot,
   User,
   Save,
+  Settings,
 } from "lucide-react";
 import { saveDesign } from "@/lib/designs";
 import { cn } from "@/lib/utils";
 
-const API = "http://localhost:8000"; // ✅ Forced local backend
+// HF Space URL — user sets this in settings or we use localStorage
+function getHFSpaceUrl(): string {
+  return localStorage.getItem("roomform_hf_url") || "http://localhost:7860";
+}
 
 const ROOM_TYPES = [
   "Bedroom",
@@ -72,11 +74,13 @@ const Design2DTab = () => {
   const [selectedThemes, setSelectedThemes] = useState<string[]>([]);
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<any>(null);
-  const [includeEvaluation, setIncludeEvaluation] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [inputMessage, setInputMessage] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [hfUrl, setHfUrl] = useState(getHFSpaceUrl());
+  const [genModel, setGenModel] = useState<"flux" | "sdxl">("flux");
 
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([
     {
@@ -100,9 +104,9 @@ const Design2DTab = () => {
     []
   );
 
-  const handleFileChange = async (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const API = hfUrl;
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -111,28 +115,7 @@ const Design2DTab = () => {
     setGeneratedImageUrl(null);
     setAnalysisResult(null);
 
-    addMessage("ai", "Analyzing room...");
-
-    const fd = new FormData();
-    fd.append("file", file);
-
-    try {
-      const resp = await fetch(`${API}/analyze`, {
-        method: "POST",
-        body: fd,
-      });
-
-      if (!resp.ok) throw new Error("Analysis failed");
-
-      const data = await resp.json();
-      setAnalysisResult(data);
-      addMessage(
-        "ai",
-        `✅ Analysis complete! Score: ${data.aesthetic_score}/10`
-      );
-    } catch {
-      addMessage("ai", "⚠️ Analysis unavailable.");
-    }
+    addMessage("ai", "📸 Room photo uploaded! Select themes and click Redesign.");
   };
 
   const toggleTheme = (id: string) => {
@@ -148,20 +131,21 @@ const Design2DTab = () => {
       .map((id) => THEMES.find((t) => t.id === id)?.label)
       .join(", ");
 
-    return `Redesign this ${roomType.toLowerCase()} in ${themeStr} style. ${extraNotes}. Photorealistic.`;
+    return `Redesign this ${roomType.toLowerCase()} in ${themeStr} style. ${extraNotes}. Photorealistic interior design, high quality, 4k.`;
   };
 
   const generateImage = async (extraNotes = "") => {
     if (!currentImage) return;
 
     setIsGenerating(true);
-    addMessage("ai", "🎨 Generating your redesign...");
+    addMessage("ai", `🎨 Generating with ${genModel === "flux" ? "FLUX Schnell" : "SDXL Turbo"}...`);
 
     const prompt = buildPrompt(extraNotes);
 
     const fd = new FormData();
     fd.append("file", currentImage);
     fd.append("style_prompt", prompt);
+    fd.append("model", genModel);
 
     try {
       const resp = await fetch(`${API}/design/generate/2d/repaint`, {
@@ -169,13 +153,16 @@ const Design2DTab = () => {
         body: fd,
       });
 
-      if (!resp.ok) throw new Error("Generation failed");
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: "Unknown error" }));
+        throw new Error(err.detail || "Generation failed");
+      }
 
       const data = await resp.json();
       setGeneratedImageUrl(data.image_url);
       addMessage("ai", "Here is your redesign 👇", data.image_url);
-    } catch {
-      addMessage("ai", "❌ Image generation failed.");
+    } catch (err: any) {
+      addMessage("ai", `❌ ${err.message || "Image generation failed. Check HF Space URL in settings."}`);
     }
 
     setIsGenerating(false);
@@ -186,7 +173,6 @@ const Design2DTab = () => {
       toast({ title: "Upload photo and select at least one theme" });
       return;
     }
-
     await generateImage();
   };
 
@@ -226,24 +212,72 @@ const Design2DTab = () => {
 
   const handleSave = async () => {
     if (!generatedImageUrl) return;
-
     setIsSaving(true);
-
     await saveDesign({
       type: "2d",
       name: `${roomType}`,
       thumbnail_url: generatedImageUrl,
       data: { roomType, themes: selectedThemes },
     });
-
     toast({ title: "Design saved!" });
     setIsSaving(false);
+  };
+
+  const handleSaveHfUrl = () => {
+    localStorage.setItem("roomform_hf_url", hfUrl);
+    toast({ title: "HF Space URL saved", description: hfUrl });
   };
 
   return (
     <div className="flex flex-col lg:flex-row gap-4 p-4 h-full">
       {/* LEFT PANEL */}
       <div className="w-full lg:w-80 space-y-4 shrink-0">
+        {/* HF Space Settings */}
+        <Card>
+          <CardContent className="p-3">
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground w-full"
+            >
+              <Settings className="w-3 h-3" />
+              <span>Backend Settings</span>
+            </button>
+            {showSettings && (
+              <div className="mt-2 space-y-2">
+                <div className="space-y-1">
+                  <Label className="text-xs">HF Space URL</Label>
+                  <div className="flex gap-1">
+                    <Input
+                      className="text-xs h-7"
+                      placeholder="https://your-space.hf.space"
+                      value={hfUrl}
+                      onChange={(e) => setHfUrl(e.target.value)}
+                    />
+                    <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={handleSaveHfUrl}>
+                      Save
+                    </Button>
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">
+                    Your HF Space running the Roomform FastAPI + Gradio app
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Generation Model</Label>
+                  <Select value={genModel} onValueChange={(v) => setGenModel(v as "flux" | "sdxl")}>
+                    <SelectTrigger className="h-7 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="flux">FLUX Schnell (quality)</SelectItem>
+                      <SelectItem value="sdxl">SDXL Turbo (fast)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardContent className="p-3 space-y-3">
             <div
@@ -272,9 +306,7 @@ const Design2DTab = () => {
               </SelectTrigger>
               <SelectContent>
                 {ROOM_TYPES.map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {r}
-                  </SelectItem>
+                  <SelectItem key={r} value={r}>{r}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -329,7 +361,7 @@ const Design2DTab = () => {
               </>
             ) : (
               <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                <p className="text-sm">Upload and redesign your room.</p>
+                <p className="text-sm">Upload a room photo, pick themes, and click Redesign.</p>
               </div>
             )}
           </CardContent>

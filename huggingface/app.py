@@ -1,30 +1,31 @@
 """
-Roomform.ai — FastAPI Backend for Hugging Face Spaces
-Wraps your master_engine.py for deployment on HF Spaces with free T4 GPU.
+Roomform.ai — FastAPI + Gradio Backend for Hugging Face Spaces
+Uses HF Inference API for image generation (FLUX, SDXL Turbo).
 """
 
 import os
 import io
-import json
 import base64
+import time
 import logging
 import requests
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
+import gradio as gr
 
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("roomform")
 
-app = FastAPI(
-    title="Roomform.ai API",
-    description="AI-powered interior design evaluation using YOLO, CLIP, MiDaS, ViT, SAM, and TensorFlow",
-    version="1.0.0",
-)
+HF_TOKEN = os.getenv("HF_TOKEN")
+HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# CORS — allow all origins for the React frontend
+FLUX_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+SDXL_URL = "https://api-inference.huggingface.co/models/stabilityai/sdxl-turbo"
+
+app = FastAPI(title="Roomform.ai API", version="2.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,109 +34,152 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Import your master engine
-# Make sure master_engine.py is in the same directory
-try:
-    from master_engine import MasterEngine
-    engine = MasterEngine()
-    logger.info("✅ MasterEngine loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to load MasterEngine: {e}")
-    engine = None
 
+def query_hf_model(url: str, payload: dict, retries: int = 10) -> Image.Image | None:
+    """Query HF Inference API with retry for model loading."""
+    for attempt in range(retries):
+        try:
+            resp = requests.post(url, headers=HEADERS, json=payload, timeout=120)
+
+            if resp.status_code == 503:
+                logger.info(f"Model loading, retry {attempt + 1}/{retries}...")
+                time.sleep(5)
+                continue
+
+            if resp.status_code != 200:
+                logger.error(f"HF API error {resp.status_code}: {resp.text[:200]}")
+                return None
+
+            # Raw image bytes
+            try:
+                return Image.open(io.BytesIO(resp.content))
+            except Exception:
+                pass
+
+            # JSON with image URL
+            try:
+                data = resp.json()
+                if isinstance(data, list) and "generated_image" in data[0]:
+                    img_resp = requests.get(data[0]["generated_image"], stream=True)
+                    return Image.open(img_resp.raw)
+            except Exception:
+                pass
+
+            logger.error("Could not parse HF response")
+            return None
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout on attempt {attempt + 1}")
+            continue
+        except Exception as e:
+            logger.error(f"Request error: {e}")
+            return None
+
+    return None
+
+
+def image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
+    buf = io.BytesIO()
+    img.save(buf, format=fmt)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+# ── Health ──
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
     return {
         "status": "running",
         "service": "roomform.ai",
-        "engine_loaded": engine is not None,
-        "models": [
-            "YOLO v26n",
-            "OWL-ViT (owlvit-base-patch32)",
-            "SAM (vit_h)",
-            "CLIP (ViT-B/32)",
-            "MiDaS (small)",
-            "ViT Aesthetic (vit_small_patch16_224)",
-            "TensorFlow Trait Model",
-        ],
+        "hf_token_set": bool(HF_TOKEN),
+        "models": ["FLUX.1-schnell", "SDXL Turbo"],
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "engine": engine is not None}
+    return {"status": "healthy", "hf_token": bool(HF_TOKEN)}
 
 
-@app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+# ── Image Generation (REST API for frontend) ──
+
+@app.post("/design/generate/2d/repaint")
+async def generate_repaint(
+    file: UploadFile = File(...),
+    style_prompt: str = Form("modern minimalist interior design, photorealistic"),
+    model: str = Form("flux"),
+):
     """
-    Analyze a room image using the full ML pipeline.
-    
-    Accepts: JPG/PNG image file
-    Returns: Full analysis JSON with metrics, objects, styles, etc.
+    Generate a room redesign using HF Inference API.
+    Accepts: image file + style_prompt + model (flux | sdxl)
+    Returns: { image_url: "data:image/png;base64,..." }
     """
-    if engine is None:
-        raise HTTPException(
-            status_code=503,
-            detail="ML engine not loaded. Check model weights and dependencies.",
-        )
-
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File must be an image (JPG/PNG)")
-
-    try:
-        # Read image
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        logger.info(f"📸 Received image: {file.filename} ({image.size})")
-
-        # Run analysis using your master engine
-        result = engine.analyze(image)
-
-        logger.info("✅ Analysis complete")
-        return JSONResponse(content=result)
-
-    except Exception as e:
-        logger.error(f"❌ Analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-
-
-# ── ComfyUI Bridge ──
-try:
-    from comfyui_bridge import generate_with_comfyui, is_comfyui_available
-    logger.info("✅ ComfyUI bridge imported")
-except Exception as e:
-    logger.warning(f"⚠️ ComfyUI bridge not available: {e}")
-    generate_with_comfyui = None
-    is_comfyui_available = lambda: False
-
-
-@app.get("/comfyui/status")
-async def comfyui_status():
-    """Check if ComfyUI is running."""
-    available = is_comfyui_available()
-    return {"available": available, "url": "http://127.0.0.1:8188"}
-
-
-@app.post("/design/generate/2d/comfyui")
-async def generate_comfyui(file: UploadFile = File(...), style_prompt: str = "modern minimalist interior"):
-    """Generate a room redesign using local ComfyUI pipeline."""
-    if not generate_with_comfyui or not is_comfyui_available():
-        raise HTTPException(status_code=503, detail="ComfyUI is not running. Start it with: python main.py --cpu")
+    if not HF_TOKEN:
+        raise HTTPException(status_code=503, detail="HF_TOKEN not set")
 
     try:
         contents = await file.read()
-        result = generate_with_comfyui(contents, style_prompt)
-        return JSONResponse(content=result)
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="ComfyUI generation timed out (>120s)")
+        input_image = Image.open(io.BytesIO(contents)).convert("RGB")
+        logger.info(f"📸 Input: {file.filename} ({input_image.size}), model={model}")
     except Exception as e:
-        logger.error(f"ComfyUI generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"ComfyUI generation failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
 
+    # Build the prompt
+    prompt = style_prompt
+
+    # Pick model URL
+    model_url = FLUX_URL if model != "sdxl" else SDXL_URL
+    model_name = "FLUX.1-schnell" if model != "sdxl" else "SDXL Turbo"
+
+    logger.info(f"🎨 Generating with {model_name}: {prompt[:80]}...")
+
+    result_image = query_hf_model(model_url, {"inputs": prompt})
+
+    if result_image is None:
+        raise HTTPException(status_code=500, detail=f"{model_name} generation failed")
+
+    # Return as base64 data URL
+    b64 = image_to_base64(result_image)
+    image_url = f"data:image/png;base64,{b64}"
+
+    logger.info("✅ Generation complete")
+    return JSONResponse(content={"image_url": image_url})
+
+
+# ── Gradio UI (for manual testing) ──
+
+def gradio_generate(image, prompt, task):
+    if task == "Interior Generation (FLUX Schnell)":
+        return query_hf_model(FLUX_URL, {"inputs": prompt})
+    elif task == "Fast Generation (SDXL Turbo)":
+        return query_hf_model(SDXL_URL, {"inputs": prompt})
+    else:
+        if image is None:
+            return None
+        return query_hf_model(FLUX_URL, {"inputs": prompt})
+
+
+demo = gr.Interface(
+    fn=gradio_generate,
+    inputs=[
+        gr.Image(type="pil", label="Upload Interior or Floorplan"),
+        gr.Textbox(label="Prompt"),
+        gr.Dropdown(
+            [
+                "Interior Generation (FLUX Schnell)",
+                "Fast Generation (SDXL Turbo)",
+                "Floorplan Editing",
+            ],
+            value="Interior Generation (FLUX Schnell)",
+            label="Model",
+        ),
+    ],
+    outputs=gr.Image(label="Generated Image"),
+    title="AI Interior + Floorplan Generator",
+    description="Generate interiors using Hugging Face models (FLUX, SDXL Turbo).",
+)
+
+app = gr.mount_gradio_app(app, demo, path="/gradio")
 
 if __name__ == "__main__":
     import uvicorn
