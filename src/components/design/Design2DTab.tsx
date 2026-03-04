@@ -22,16 +22,12 @@ import {
 } from "lucide-react";
 import { saveDesign } from "@/lib/designs";
 import { cn } from "@/lib/utils";
-import { geminiGenerateImage, geminiChat } from "@/services/geminiAI";
+import { puterGenerateImage, PUTER_MODELS } from "@/services/puterAI";
+import { geminiChat } from "@/services/geminiAI";
 
 const ROOM_TYPES = [
-  "Bedroom",
-  "Living Room",
-  "Kitchen",
-  "Bathroom",
-  "Dining Room",
-  "Office",
-  "Kids Room",
+  "Bedroom", "Living Room", "Kitchen", "Bathroom",
+  "Dining Room", "Office", "Kids Room",
 ];
 
 const THEMES = [
@@ -62,10 +58,10 @@ const Design2DTab = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const [currentImageBase64, setCurrentImageBase64] = useState<string | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [roomType, setRoomType] = useState("Bedroom");
   const [selectedThemes, setSelectedThemes] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState("flux-schnell");
   const [generatedImageUrl, setGeneratedImageUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -76,7 +72,7 @@ const Design2DTab = () => {
     {
       role: "ai",
       content:
-        "Hi 👋 Upload a room photo and select themes. Tell me what you'd like to change!",
+        "Hi 👋 Upload a room photo for reference, select themes, and I'll generate a redesign using AI. No API keys needed!",
     },
   ]);
 
@@ -97,14 +93,12 @@ const Design2DTab = () => {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = (ev) => {
       const base64 = ev.target?.result as string;
-      setCurrentImageBase64(base64);
       setImagePreview(base64);
       setGeneratedImageUrl(null);
-      addMessage("ai", "📸 Room photo uploaded! Select themes and click Redesign, or tell me what to change.");
+      addMessage("ai", "📸 Room photo uploaded! Select themes and click Redesign to generate a new design.");
     };
     reader.readAsDataURL(file);
   };
@@ -121,29 +115,18 @@ const Design2DTab = () => {
     const themeStr = selectedThemes
       .map((id) => THEMES.find((t) => t.id === id)?.label)
       .join(", ");
-
-    return `Redesign this ${roomType.toLowerCase()} in ${themeStr || "modern"} style. ${extraNotes}. Keep the same room layout and perspective. Photorealistic interior design.`;
+    return `Professional interior design photo of a ${roomType.toLowerCase()} in ${themeStr || "modern"} style. ${extraNotes}. Photorealistic, high quality, beautiful lighting, magazine cover quality.`;
   };
 
   const generateImage = async (extraNotes = "") => {
-    if (!currentImageBase64) return;
-
     setIsGenerating(true);
-    addMessage("ai", "🎨 Generating your redesign with Gemini AI...");
-
-    const prompt = buildPrompt(extraNotes);
+    addMessage("ai", `🎨 Generating with ${PUTER_MODELS.find(m => m.id === selectedModel)?.label || selectedModel}...`);
 
     try {
-      const result = await geminiGenerateImage(prompt, currentImageBase64);
-
-      if (result.image_url) {
-        setGeneratedImageUrl(result.image_url);
-        addMessage("ai", "Here is your redesign 👇", result.image_url);
-      } else if (result.description) {
-        addMessage("ai", `💡 ${result.description}`);
-      } else {
-        addMessage("ai", "❌ No image was generated. Please try again.");
-      }
+      const prompt = buildPrompt(extraNotes);
+      const imageUrl = await puterGenerateImage(prompt, selectedModel);
+      setGeneratedImageUrl(imageUrl);
+      addMessage("ai", "Here is your redesign 👇", imageUrl);
     } catch (err: any) {
       addMessage("ai", `❌ Generation failed: ${err.message}`);
       toast({ title: "Generation failed", description: err.message, variant: "destructive" });
@@ -153,8 +136,8 @@ const Design2DTab = () => {
   };
 
   const handleGenerate = async () => {
-    if (!currentImageBase64 || selectedThemes.length === 0) {
-      toast({ title: "Upload photo and select at least one theme" });
+    if (selectedThemes.length === 0) {
+      toast({ title: "Select at least one theme" });
       return;
     }
     await generateImage();
@@ -163,26 +146,23 @@ const Design2DTab = () => {
   const handleChatSubmit = async () => {
     const msg = inputMessage.trim();
     if (!msg) return;
-
     setInputMessage("");
     addMessage("user", msg);
 
-    // If there's a generated image, treat as a modification request
-    if (generatedImageUrl && /change|add|remove|make|more|less|update|modify|warmer|cooler|brighter|darker/i.test(msg)) {
+    if (/change|add|remove|make|more|less|update|modify|warmer|cooler|brighter|darker|generate|create|design/i.test(msg)) {
       await generateImage(msg);
       return;
     }
 
-    // Otherwise use Gemini chat for design advice
     setIsTyping(true);
     try {
       const reply = await geminiChat(
         [{ role: "user", content: msg }],
-        "You are an interior design assistant. Give brief, actionable advice. If the user describes changes, suggest they click 'Redesign Room' to see the result."
+        "You are an interior design assistant. Give brief, actionable advice. If the user describes design changes, tell them to click 'Redesign Room' or describe the change so you can generate it."
       );
       addMessage("ai", reply);
     } catch {
-      addMessage("ai", "Try saying something like: 'Make it warmer' or 'Add wooden shelves', then click Redesign.");
+      addMessage("ai", "Try describing a design like: 'Modern minimalist bedroom with warm lighting' and I'll generate it!");
     }
     setIsTyping(false);
   };
@@ -227,7 +207,7 @@ const Design2DTab = () => {
               ) : (
                 <div className="flex flex-col items-center gap-2 text-muted-foreground">
                   <Upload className="w-8 h-8" />
-                  <span className="text-sm">Upload JPG / PNG</span>
+                  <span className="text-sm">Upload reference photo (optional)</span>
                 </div>
               )}
               <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
@@ -236,7 +216,7 @@ const Design2DTab = () => {
         </Card>
 
         <Card>
-          <CardContent className="p-3">
+          <CardContent className="p-3 space-y-2">
             <Label className="text-xs mb-1 block">Room Type</Label>
             <Select value={roomType} onValueChange={setRoomType}>
               <SelectTrigger className="h-8 text-xs">
@@ -245,6 +225,18 @@ const Design2DTab = () => {
               <SelectContent>
                 {ROOM_TYPES.map((r) => (
                   <SelectItem key={r} value={r}>{r}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Label className="text-xs mt-2 block">AI Model</Label>
+            <Select value={selectedModel} onValueChange={setSelectedModel}>
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PUTER_MODELS.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -283,7 +275,6 @@ const Design2DTab = () => {
       <div className="flex-1 min-w-0 flex flex-col">
         <Card className="flex-1">
           <CardContent className="p-4 h-full flex flex-col">
-            {/* Chat / Image area */}
             <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 mb-3 min-h-[300px]">
               {chatHistory.map((msg, i) => (
                 <div key={i} className={cn("flex gap-2", msg.role === "user" ? "justify-end" : "justify-start")}>
@@ -310,7 +301,6 @@ const Design2DTab = () => {
               )}
             </div>
 
-            {/* Action buttons for generated image */}
             {generatedImageUrl && (
               <div className="flex gap-2 mb-3 justify-center">
                 <Button size="sm" variant="outline" onClick={handleSave} disabled={isSaving}>
@@ -324,14 +314,13 @@ const Design2DTab = () => {
               </div>
             )}
 
-            {/* Chat input */}
             <div className="flex gap-2">
               <input
                 type="text"
                 value={inputMessage}
                 onChange={(e) => setInputMessage(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleChatSubmit()}
-                placeholder="Ask about design or request changes..."
+                placeholder="Describe a design or ask for changes..."
                 className="flex-1 border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground placeholder:text-muted-foreground"
               />
               <Button size="sm" onClick={handleChatSubmit} disabled={isTyping || isGenerating}>

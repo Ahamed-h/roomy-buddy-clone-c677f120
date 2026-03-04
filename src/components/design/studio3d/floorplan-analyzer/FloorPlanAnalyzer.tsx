@@ -7,6 +7,7 @@ import { analyzeFloorplan } from "./analyzeFloorplan";
 import type { AnalyzedRoom, FloorPlanAnalysis } from "./types";
 import { ROOM_COLORS } from "./types";
 import { supabase } from "@/integrations/supabase/client";
+import { puterGenerateImage } from "@/services/puterAI";
 
 type Step = "upload" | "analyzing" | "results" | "generating" | "generated";
 
@@ -120,39 +121,36 @@ export default function FloorPlanAnalyzer() {
     setError(null);
 
     try {
-      // Gather all AI recommendations text
       const aiRecs = analysis.recommendations?.map(r => `${r.title}: ${r.description}`) || [];
       const selectedRecs = selectedAiSuggestions.length > 0 ? selectedAiSuggestions : aiRecs;
 
-      // Strip the data URL prefix for the edge function
-      const rawB64 = imgBase64?.replace(/^data:image\/[^;]+;base64,/, "") || null;
-
+      // Get prompt from edge function
       const { data, error: fnError } = await supabase.functions.invoke("generate-floorplan", {
         body: {
           analysisData: { ...analysis, rooms },
           aiSuggestions: selectedRecs,
           userSuggestions: userSuggestions.trim(),
-          imageBase64: imgBase64, // Send full data URL for image editing
         },
       });
 
       if (fnError) throw fnError;
       if (data?.error) throw new Error(data.error);
 
-      if (data?.image_url) {
-        setGeneratedImage(data.image_url);
-        setGeneratedDescription(data.description || "");
-        setStep("generated");
-        toast({ title: "Floor Plan Generated!", description: "Your redesigned floor plan is ready." });
-      } else {
-        throw new Error("No image was generated. Try again.");
-      }
+      const prompt = data.prompt || `Professional 2D architectural floor plan with ${rooms.length} rooms`;
+
+      // Generate image using Puter.js (free, no API key needed)
+      const imageUrl = await puterGenerateImage(prompt, "flux-schnell");
+
+      setGeneratedImage(imageUrl);
+      setGeneratedDescription(data.description || "");
+      setStep("generated");
+      toast({ title: "Floor Plan Generated!", description: "Your redesigned floor plan is ready." });
     } catch (e: any) {
       setError("Generation failed: " + e.message);
       setStep("results");
       toast({ title: "Generation Failed", description: e.message, variant: "destructive" });
     }
-  }, [analysis, rooms, selectedAiSuggestions, userSuggestions, imgBase64, toast]);
+  }, [analysis, rooms, selectedAiSuggestions, userSuggestions, toast]);
 
   const handleDownload = useCallback(() => {
     if (!generatedImage) return;
