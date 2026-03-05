@@ -117,7 +117,7 @@ export async function analyzeFloorplan(imageBase64: string): Promise<FloorPlanAn
 
   const lines = apiResult.analysis.split("\n").filter((l) => l.trim().length > 10);
   lines.slice(0, 5).forEach((line) => {
-    result.insights.push({ type: "info", text: line.trim() });
+    result.insights.push({ type: "positive", text: line.trim() });
   });
 
   const suggestionLines = lines.filter((l) =>
