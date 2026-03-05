@@ -366,7 +366,6 @@ const Evaluate = () => {
                         <th className="p-2 text-left font-medium text-muted-foreground">Object</th>
                         <th className="p-2 text-left font-medium text-muted-foreground">Confidence</th>
                         <th className="p-2 text-left font-medium text-muted-foreground">Material</th>
-                        <th className="p-2 text-left font-medium text-muted-foreground">Distance</th>
                         <th className="p-2 text-left font-medium text-muted-foreground">Source</th>
                       </tr>
                     </thead>
@@ -375,8 +374,7 @@ const Evaluate = () => {
                         <tr key={i} className="border-b border-border/30">
                           <td className="p-2 capitalize font-medium text-foreground">{obj.name || (obj as any).label}</td>
                           <td className="p-2 text-foreground">{(obj.confidence * 100).toFixed(0)}%</td>
-                          <td className="p-2"><Badge variant="secondary" className="capitalize">{obj.material}</Badge></td>
-                          <td className="p-2 text-foreground">{(obj.distance_m ?? (obj as any).distance ?? 0).toFixed(1)}m</td>
+                          <td className="p-2"><Badge variant="secondary" className="capitalize">{obj.material || "unknown"}</Badge></td>
                           <td className="p-2"><Badge variant="outline">{obj.source}</Badge></td>
                         </tr>
                       ))}
@@ -385,16 +383,6 @@ const Evaluate = () => {
                 </div>
               </CardContent>
             </Card>
-
-            {/* Depth Map indicator */}
-            {result.depth_map && result.depth_map.length > 0 && (
-              <Card className="glass-card-static">
-                <CardContent className="flex items-center gap-3 pt-6">
-                  <Layers className="h-5 w-5 text-primary" />
-                  <p className="text-sm font-medium text-foreground">Depth map available ({result.depth_map.length}×{result.depth_map[0]?.length || 0} pixels)</p>
-                </CardContent>
-              </Card>
-            )}
 
             {/* Recommendations */}
             <Card className="glass-card-static">
