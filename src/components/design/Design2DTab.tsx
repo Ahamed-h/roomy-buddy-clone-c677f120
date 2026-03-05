@@ -7,8 +7,10 @@ import {
 } from "lucide-react";
 import { saveDesign } from "@/lib/designs";
 import { cn } from "@/lib/utils";
-import { designChat, type ChatResult } from "@/services/api";
-import { fileToBase64 } from "@/services/api";
+import {
+  designChat, fileToBase64,
+  type ChatResult,
+} from "@/services/api";
 
 interface ChatMessage {
   role: "user" | "ai";
