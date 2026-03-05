@@ -131,8 +131,8 @@ export default function FloorPlanAnalyzer() {
 
       const result = await generateFloorplanRoom(file, roomLabel, style);
 
-      if (result.image_b64) {
-        const imgUrl = `data:image/png;base64,${result.image_b64}`;
+      if (result.image_url) {
+        const imgUrl = result.image_url;
         setGeneratedImage(imgUrl);
         setGeneratedDescription(result.description || "");
         setStep("generated");

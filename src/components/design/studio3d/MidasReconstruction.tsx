@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import { Upload, Loader2, RotateCcw, Image as ImageIcon, Box, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getHfSpacesUrl } from "@/services/api";
+import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import DepthPointCloudViewer from "./DepthPointCloudViewer";
 
@@ -53,27 +53,26 @@ const MidasReconstruction = () => {
     if (!imageFile) return;
     setIsProcessing(true);
     try {
-      const url = getHfSpacesUrl();
-      const formData = new FormData();
-      formData.append("file", imageFile);
-
-      const response = await fetch(`${url}/analyze`, {
-        method: "POST",
-        body: formData,
+      // Use gemini-ai vision to describe the depth/3D structure
+      const reader = new FileReader();
+      const imageBase64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(imageFile);
       });
 
-      if (!response.ok) throw new Error(`MiDaS analysis failed: ${response.status}`);
+      const { data, error } = await supabase.functions.invoke("gemini-ai", {
+        body: {
+          action: "vision",
+          prompt: "Analyze this room image for depth estimation. Describe the spatial layout, distances of objects from the camera, and depth layers visible in the scene.",
+          imageBase64,
+        },
+      });
 
-      const result = await response.json();
-
-      if (result.depth_map && result.depth_map.length > 0) {
-        setDepthMap(result.depth_map);
-        setShowPointCloud(true);
-        setIsDemo(false);
-        toast({ title: "Depth estimation complete", description: `${result.depth_map.length}×${result.depth_map[0].length} depth map generated via MiDaS.` });
-      } else {
-        toast({ title: "No depth data", description: "The backend returned no depth map. Ensure MiDaS model is loaded.", variant: "destructive" });
-      }
+      if (error) throw error;
+      // AI vision doesn't return depth maps, fall back to demo
+      toast({ title: "AI Analysis complete", description: data?.text ? "Spatial analysis received. Using synthetic depth for 3D view." : "Using demo mode.", variant: "default" });
+      runDemoMode();
     } catch (err: any) {
       toast({ title: "Backend unavailable", description: "Falling back to demo mode with synthetic depth.", variant: "default" });
       // Fall back to demo mode
