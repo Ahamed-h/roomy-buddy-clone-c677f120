@@ -70,16 +70,9 @@ const MidasReconstruction = () => {
       });
 
       if (error) throw error;
-      const result = data;
-
-      if (result.depth_map && result.depth_map.length > 0) {
-        setDepthMap(result.depth_map);
-        setShowPointCloud(true);
-        setIsDemo(false);
-        toast({ title: "Depth estimation complete", description: `${result.depth_map.length}×${result.depth_map[0].length} depth map generated via MiDaS.` });
-      } else {
-        toast({ title: "No depth data", description: "The backend returned no depth map. Ensure MiDaS model is loaded.", variant: "destructive" });
-      }
+      // AI vision doesn't return depth maps, fall back to demo
+      toast({ title: "AI Analysis complete", description: data?.text ? "Spatial analysis received. Using synthetic depth for 3D view." : "Using demo mode.", variant: "default" });
+      runDemoMode();
     } catch (err: any) {
       toast({ title: "Backend unavailable", description: "Falling back to demo mode with synthetic depth.", variant: "default" });
       // Fall back to demo mode
