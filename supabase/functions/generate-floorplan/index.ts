@@ -7,7 +7,7 @@ const corsHeaders = {
 };
 
 const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const IMAGE_GEN_MODEL = "google/gemini-3-pro-image-preview";
+const IMAGE_GEN_MODEL = "google/gemini-2.5-flash-image";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
