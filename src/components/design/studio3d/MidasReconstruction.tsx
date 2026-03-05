@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import { Upload, Loader2, RotateCcw, Image as ImageIcon, Box, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getHfSpacesUrl } from "@/services/api";
+import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import DepthPointCloudViewer from "./DepthPointCloudViewer";
 
