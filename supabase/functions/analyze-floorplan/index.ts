@@ -1,5 +1,4 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { SignJWT, importPKCS8 } from "https://deno.land/x/jose@v5.2.0/index.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,37 +6,25 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-async function getAccessToken(): Promise<string> {
-  const saJson = Deno.env.get("GCP_SERVICE_ACCOUNT_JSON");
-  if (!saJson) throw new Error("GCP_SERVICE_ACCOUNT_JSON not configured");
-  const sa = JSON.parse(saJson);
-  const privateKey = await importPKCS8(sa.private_key, "RS256");
-  const jwt = await new SignJWT({ scope: "https://www.googleapis.com/auth/cloud-platform" })
-    .setProtectedHeader({ alg: "RS256", typ: "JWT" })
-    .setIssuer(sa.client_email)
-    .setAudience(sa.token_uri)
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(privateKey);
-  const tokenRes = await fetch(sa.token_uri, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
-  });
-  if (!tokenRes.ok) throw new Error(`Token exchange failed: ${tokenRes.status}`);
-  return (await tokenRes.json()).access_token;
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+
+function getApiKey(): string {
+  const key = Deno.env.get("GOOGLE_GEMINI_API_KEY");
+  if (!key) throw new Error("GOOGLE_GEMINI_API_KEY not configured");
+  return key;
 }
 
-function getProjectId(): string {
-  return JSON.parse(Deno.env.get("GCP_SERVICE_ACCOUNT_JSON")!).project_id;
-}
-
-async function callVertexAI(accessToken: string, projectId: string, model: string, contents: any[], systemInstruction?: any): Promise<any> {
-  const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+async function callGemini(model: string, apiKey: string, contents: any[], systemInstruction?: any, generationConfig?: any): Promise<any> {
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${apiKey}`;
   const body: any = { contents };
   if (systemInstruction) body.systemInstruction = systemInstruction;
-  const resp = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!resp.ok) { const t = await resp.text(); throw new Error(`Vertex AI [${model}] failed [${resp.status}]: ${t}`); }
+  if (generationConfig) body.generationConfig = generationConfig;
+  const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!resp.ok) {
+    const t = await resp.text();
+    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded." };
+    throw new Error(`Gemini [${model}] failed [${resp.status}]: ${t}`);
+  }
   return await resp.json();
 }
 
@@ -45,7 +32,7 @@ function extractText(data: any): string {
   return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
 }
 
-// ─── RasterScan (Primary — free CV model) ───────────────────────────────
+// ─── RasterScan ─────────────────────────────────────────────────────────
 
 const RASTERSCAN_GRADIO_URL = "https://rasterscan-automated-floor-plan-digitalization.hf.space";
 
@@ -155,7 +142,7 @@ function matchRoomType(name: string): string {
   return "Unknown";
 }
 
-// ─── Vertex AI Vision (FloorPlanAnalysis format) ────────────────────────
+// ─── Gemini Vision (FloorPlanAnalysis format) ───────────────────────────
 
 const FLOORPLAN_ANALYSIS_PROMPT = `You are a licensed senior architect with 25+ years of residential and commercial design experience. Analyse the uploaded floor plan image with the precision and detail of a professional architectural review.
 
@@ -193,22 +180,18 @@ RULES:
 - impact: high, medium, low
 - Provide 4-6 insights and 2-4 recommendations with specific measurements`;
 
-async function tryVertexVision(imageBase64: string, accessToken: string, projectId: string): Promise<any | null> {
+async function tryGeminiVision(imageBase64: string, apiKey: string): Promise<any | null> {
   try {
-    console.log("Trying Vertex AI vision analysis...");
+    console.log("Trying Gemini vision analysis...");
     const raw = imageBase64.startsWith("data:") ? imageBase64.split(",")[1] : imageBase64;
-
-    const data = await callVertexAI(accessToken, projectId, "gemini-2.5-pro-preview-06-05",
+    const data = await callGemini("gemini-2.5-pro", apiKey,
       [{ role: "user", parts: [
         { text: "Analyze this floor plan image. Return only the JSON object." },
         { inlineData: { mimeType: "image/png", data: raw } },
       ]}],
       { parts: [{ text: FLOORPLAN_ANALYSIS_PROMPT }] }
     );
-
     const content = extractText(data);
-    console.log("Vertex AI vision raw length:", content.length);
-
     let jsonStr = content;
     const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (jsonMatch) jsonStr = jsonMatch[1].trim();
@@ -216,15 +199,14 @@ async function tryVertexVision(imageBase64: string, accessToken: string, project
       const braceMatch = jsonStr.match(/\{[\s\S]*\}/);
       if (braceMatch) jsonStr = braceMatch[0];
     }
-
     const parsed = JSON.parse(jsonStr);
     if (parsed.rooms && Array.isArray(parsed.rooms)) {
-      parsed.source = "vertex-ai";
-      console.log(`Vertex AI: ${parsed.rooms.length} rooms, score: ${parsed.score}`);
+      parsed.source = "gemini-ai";
+      console.log(`Gemini: ${parsed.rooms.length} rooms, score: ${parsed.score}`);
       return parsed;
     }
     return null;
-  } catch (err) { console.error("Vertex AI vision error:", err); return null; }
+  } catch (err) { console.error("Gemini vision error:", err); return null; }
 }
 
 // ─── Legacy AI Vision Fallback ──────────────────────────────────────────
@@ -252,9 +234,7 @@ serve(async (req) => {
   }
 
   try {
-    const accessToken = await getAccessToken();
-    const projectId = getProjectId();
-
+    const apiKey = getApiKey();
     const { imageBase64, imageWidth, imageHeight, format } = await req.json();
     if (!imageBase64) {
       return new Response(JSON.stringify({ error: "imageBase64 is required" }), {
@@ -266,7 +246,7 @@ serve(async (req) => {
     const imgW = imageWidth || 2000;
     const imgH = imageHeight || 1500;
 
-    // Strategy 1: RasterScan (free CV model)
+    // Strategy 1: RasterScan
     const rsResult = await tryRasterScan(imageBase64);
     if (rsResult) {
       if (wantFloorPlanFormat) {
@@ -277,18 +257,18 @@ serve(async (req) => {
       return new Response(JSON.stringify(normalized), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // Strategy 2: Vertex AI Vision (FloorPlanAnalysis format)
+    // Strategy 2: Gemini Vision (FloorPlanAnalysis)
     if (wantFloorPlanFormat) {
-      const aiResult = await tryVertexVision(imageBase64, accessToken, projectId);
+      const aiResult = await tryGeminiVision(imageBase64, apiKey);
       if (aiResult) {
         return new Response(JSON.stringify(aiResult), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
 
-    // Strategy 3: Vertex AI Vision (legacy format)
-    console.log("Falling back to Vertex AI vision (legacy)...");
+    // Strategy 3: Gemini Vision (legacy)
+    console.log("Falling back to Gemini vision (legacy)...");
     const raw = imageBase64.startsWith("data:") ? imageBase64.split(",")[1] : imageBase64;
-    const data = await callVertexAI(accessToken, projectId, "gemini-2.5-pro-preview-06-05",
+    const data = await callGemini("gemini-2.5-pro", apiKey,
       [{ role: "user", parts: [
         { text: "Analyze this floor plan. Extract every wall, door, window, furniture item, and room." },
         { inlineData: { mimeType: "image/png", data: raw } },
@@ -308,7 +288,7 @@ serve(async (req) => {
   }
 });
 
-// ─── Legacy format normalizers ──────────────────────────────────────────
+// ─── Legacy normalizers ─────────────────────────────────────────────────
 
 function normalizeRasterScanLegacy(rs: any) {
   const walls: any[] = [];
@@ -316,11 +296,8 @@ function normalizeRasterScanLegacy(rs: any) {
   const rooms: any[] = [];
   if (Array.isArray(rs.walls)) {
     rs.walls.forEach((w: any, i: number) => {
-      if (w.start && w.end) {
-        walls.push({ id: `w-rs-${i}`, start: { x: (w.start.x || 0) / 100, y: (w.start.y || 0) / 100 }, end: { x: (w.end.x || 0) / 100, y: (w.end.y || 0) / 100 }, thickness: 0.15 });
-      } else if (Array.isArray(w) && w.length >= 4) {
-        walls.push({ id: `w-rs-${i}`, start: { x: w[0] / 100, y: w[1] / 100 }, end: { x: w[2] / 100, y: w[3] / 100 }, thickness: 0.15 });
-      }
+      if (w.start && w.end) walls.push({ id: `w-rs-${i}`, start: { x: (w.start.x || 0) / 100, y: (w.start.y || 0) / 100 }, end: { x: (w.end.x || 0) / 100, y: (w.end.y || 0) / 100 }, thickness: 0.15 });
+      else if (Array.isArray(w) && w.length >= 4) walls.push({ id: `w-rs-${i}`, start: { x: w[0] / 100, y: w[1] / 100 }, end: { x: w[2] / 100, y: w[3] / 100 }, thickness: 0.15 });
     });
   }
   if (Array.isArray(rs.doors)) {
@@ -344,10 +321,7 @@ function normalizeAIResult(content: string) {
   let jsonStr = content;
   const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (jsonMatch) jsonStr = jsonMatch[1].trim();
-  if (!jsonStr.startsWith("{")) {
-    const braceMatch = jsonStr.match(/\{[\s\S]*\}/);
-    if (braceMatch) jsonStr = braceMatch[0];
-  }
+  if (!jsonStr.startsWith("{")) { const braceMatch = jsonStr.match(/\{[\s\S]*\}/); if (braceMatch) jsonStr = braceMatch[0]; }
   const parsed = JSON.parse(jsonStr);
   const unit = parsed.unit || "meters";
   const toMeters = unit === "feet" ? 0.3048 : 1;
@@ -361,5 +335,5 @@ function normalizeAIResult(content: string) {
   });
   const furnitureItems = (parsed.furniture || []).map((f: any, i: number) => ({ id: `f-ai-${i}`, type: f.type || "table", label: f.label || f.type || "Item", position: { x: (f.position?.x || 0) * toMeters, y: (f.position?.y || 0) * toMeters }, rotation: f.rotation || 0, width: (f.width || 1) * toMeters, depth: (f.depth || 1) * toMeters, height: (f.height || 1) * toMeters }));
   const rooms = (parsed.rooms || []).map((r: any, i: number) => ({ id: `r-ai-${i}`, name: r.name, center: { x: (r.center?.x || 0) * toMeters, y: (r.center?.y || 0) * toMeters } }));
-  return { walls, furniture: [...furnitureItems, ...doors, ...windows], rooms, dimensions, source: "vertex-ai" };
+  return { walls, furniture: [...furnitureItems, ...doors, ...windows], rooms, dimensions, source: "gemini-ai" };
 }

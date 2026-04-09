@@ -1,5 +1,4 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { SignJWT, importPKCS8 } from "https://deno.land/x/jose@v5.2.0/index.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,44 +6,26 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const IMAGE_GEN_MODEL = "gemini-2.0-flash-exp";
-const VERIFY_MODEL = "gemini-2.5-flash-preview-05-20";
+const VERIFY_MODEL = "gemini-2.5-flash";
 
-async function getAccessToken(): Promise<string> {
-  const saJson = Deno.env.get("GCP_SERVICE_ACCOUNT_JSON");
-  if (!saJson) throw new Error("GCP_SERVICE_ACCOUNT_JSON not configured");
-  const sa = JSON.parse(saJson);
-  const privateKey = await importPKCS8(sa.private_key, "RS256");
-  const jwt = await new SignJWT({ scope: "https://www.googleapis.com/auth/cloud-platform" })
-    .setProtectedHeader({ alg: "RS256", typ: "JWT" })
-    .setIssuer(sa.client_email)
-    .setAudience(sa.token_uri)
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(privateKey);
-  const tokenRes = await fetch(sa.token_uri, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`,
-  });
-  if (!tokenRes.ok) throw new Error(`Token exchange failed: ${tokenRes.status}`);
-  return (await tokenRes.json()).access_token;
+function getApiKey(): string {
+  const key = Deno.env.get("GOOGLE_GEMINI_API_KEY");
+  if (!key) throw new Error("GOOGLE_GEMINI_API_KEY not configured");
+  return key;
 }
 
-function getProjectId(): string {
-  return JSON.parse(Deno.env.get("GCP_SERVICE_ACCOUNT_JSON")!).project_id;
-}
-
-async function callVertexAI(accessToken: string, projectId: string, model: string, contents: any[], systemInstruction?: any, generationConfig?: any): Promise<any> {
-  const url = `https://us-central1-aiplatform.googleapis.com/v1/projects/${projectId}/locations/us-central1/publishers/google/models/${model}:generateContent`;
+async function callGemini(model: string, apiKey: string, contents: any[], systemInstruction?: any, generationConfig?: any): Promise<any> {
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${apiKey}`;
   const body: any = { contents };
   if (systemInstruction) body.systemInstruction = systemInstruction;
   if (generationConfig) body.generationConfig = generationConfig;
-  const resp = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!resp.ok) {
     const t = await resp.text();
-    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded. Please try again." };
-    throw new Error(`Vertex AI [${model}] failed [${resp.status}]: ${t}`);
+    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded." };
+    throw new Error(`Gemini [${model}] failed [${resp.status}]: ${t}`);
   }
   return await resp.json();
 }
@@ -60,28 +41,20 @@ function extractImage(data: any): string | null {
   return null;
 }
 
-// ─── Generate & Verify ──────────────────────────────────────────────────
-
-async function generateImage(accessToken: string, projectId: string, prompt: string, imageBase64?: string): Promise<{ image_url: string | null; description: string }> {
+async function generateImage(apiKey: string, prompt: string, imageBase64?: string): Promise<{ image_url: string | null; description: string }> {
   const parts: any[] = [{ text: prompt }];
   if (imageBase64) {
     const raw = imageBase64.startsWith("data:") ? imageBase64.split(",")[1] : imageBase64;
     parts.push({ inlineData: { mimeType: "image/jpeg", data: raw } });
   }
-
-  const data = await callVertexAI(accessToken, projectId, IMAGE_GEN_MODEL,
-    [{ role: "user", parts }],
-    undefined,
-    { responseModalities: ["IMAGE", "TEXT"] }
-  );
-
+  const data = await callGemini(IMAGE_GEN_MODEL, apiKey, [{ role: "user", parts }], undefined, { responseModalities: ["IMAGE", "TEXT"] });
   return { image_url: extractImage(data), description: extractText(data) };
 }
 
-async function verifyGeneration(accessToken: string, projectId: string, generatedImageUrl: string, originalPrompt: string): Promise<{ passed: boolean; feedback: string }> {
+async function verifyGeneration(apiKey: string, generatedImageUrl: string, originalPrompt: string): Promise<{ passed: boolean; feedback: string }> {
   try {
     const raw = generatedImageUrl.startsWith("data:") ? generatedImageUrl.split(",")[1] : generatedImageUrl;
-    const data = await callVertexAI(accessToken, projectId, VERIFY_MODEL,
+    const data = await callGemini(VERIFY_MODEL, apiKey,
       [{ role: "user", parts: [
         { text: `Original requirements: ${originalPrompt.substring(0, 500)}` },
         { inlineData: { mimeType: "image/png", data: raw } },
@@ -101,8 +74,6 @@ async function verifyGeneration(accessToken: string, projectId: string, generate
   }
 }
 
-// ─── Main Handler ───────────────────────────────────────────────────────
-
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -116,8 +87,7 @@ serve(async (req) => {
       });
     }
 
-    const accessToken = await getAccessToken();
-    const projectId = getProjectId();
+    const apiKey = getApiKey();
 
     const rooms = analysisData.rooms || [];
     const roomDescriptions = rooms.map((r: any) =>
@@ -155,17 +125,17 @@ DRAWING SPECIFICATIONS:
 - Add dimension lines for major room measurements`;
 
     console.log("Generating floor plan (attempt 1)...");
-    let result = await generateImage(accessToken, projectId, prompt, imageBase64);
+    let result = await generateImage(apiKey, prompt, imageBase64);
 
     if (result.image_url) {
       console.log("Verifying generated floor plan quality...");
-      const verification = await verifyGeneration(accessToken, projectId, result.image_url, prompt);
+      const verification = await verifyGeneration(apiKey, result.image_url, prompt);
       console.log(`Verification: passed=${verification.passed}, feedback=${verification.feedback}`);
 
       if (!verification.passed) {
         console.log("Verification failed, regenerating (attempt 2)...");
         const retryPrompt = `${prompt}\n\nIMPORTANT CORRECTION:\n${verification.feedback}\nPlease ensure clear 2D architectural floor plan with all room labels visible.`;
-        result = await generateImage(accessToken, projectId, retryPrompt, imageBase64);
+        result = await generateImage(apiKey, retryPrompt, imageBase64);
         if (result.image_url) result.description = `[Refined] ${result.description}`;
       }
     }
