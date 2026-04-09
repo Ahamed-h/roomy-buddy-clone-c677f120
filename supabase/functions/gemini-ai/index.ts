@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { SignJWT, importPKCS8 } from "https://deno.land/x/jose@v5.2.0/index.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,58 +8,27 @@ const corsHeaders = {
 };
 
 // Models
-const IMAGE_GEN_MODEL = "gemini-2.0-flash-exp"; // supports image generation
+const IMAGE_GEN_MODEL = "gemini-2.0-flash-exp";
 const VISION_MODEL = "gemini-2.5-flash-preview-05-20";
 const CHAT_MODEL = "gemini-2.5-flash-preview-05-20";
 
-function b64url(data: string): string {
-  return btoa(data).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function b64urlBytes(arr: Uint8Array): string {
-  return btoa(String.fromCharCode(...arr)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-/** Parse the GCP service account JSON and generate an access token */
+/** Get access token using service account JWT */
 async function getAccessToken(): Promise<string> {
   const saJson = Deno.env.get("GCP_SERVICE_ACCOUNT_JSON");
   if (!saJson) throw new Error("GCP_SERVICE_ACCOUNT_JSON not configured");
 
   const sa = JSON.parse(saJson);
-  const now = Math.floor(Date.now() / 1000);
-  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = b64url(JSON.stringify({
-    iss: sa.client_email,
+  const privateKey = await importPKCS8(sa.private_key, "RS256");
+
+  const jwt = await new SignJWT({
     scope: "https://www.googleapis.com/auth/cloud-platform",
-    aud: sa.token_uri,
-    exp: now + 3600,
-    iat: now,
-  }));
-
-  const signInput = `${header}.${payload}`;
-
-  const pemContent = sa.private_key
-    .replace("-----BEGIN PRIVATE KEY-----", "")
-    .replace("-----END PRIVATE KEY-----", "")
-    .replace(/\n/g, "");
-  const binaryKey = Uint8Array.from(atob(pemContent), (c) => c.charCodeAt(0));
-
-  const cryptoKey = await crypto.subtle.importKey(
-    "pkcs8",
-    binaryKey,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    cryptoKey,
-    new TextEncoder().encode(signInput)
-  );
-
-  const sig = b64urlBytes(new Uint8Array(signature));
-  const jwt = `${header}.${payload}.${sig}`;
+  })
+    .setProtectedHeader({ alg: "RS256", typ: "JWT" })
+    .setIssuer(sa.client_email)
+    .setAudience(sa.token_uri)
+    .setIssuedAt()
+    .setExpirationTime("1h")
+    .sign(privateKey);
 
   const tokenRes = await fetch(sa.token_uri, {
     method: "POST",
