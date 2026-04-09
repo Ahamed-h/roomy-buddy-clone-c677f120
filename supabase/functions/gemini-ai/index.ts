@@ -11,6 +11,14 @@ const IMAGE_GEN_MODEL = "gemini-2.0-flash-exp"; // supports image generation
 const VISION_MODEL = "gemini-2.5-flash-preview-05-20";
 const CHAT_MODEL = "gemini-2.5-flash-preview-05-20";
 
+function b64url(data: string): string {
+  return btoa(data).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function b64urlBytes(arr: Uint8Array): string {
+  return btoa(String.fromCharCode(...arr)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 /** Parse the GCP service account JSON and generate an access token */
 async function getAccessToken(): Promise<string> {
   const saJson = Deno.env.get("GCP_SERVICE_ACCOUNT_JSON");
@@ -18,8 +26,8 @@ async function getAccessToken(): Promise<string> {
 
   const sa = JSON.parse(saJson);
   const now = Math.floor(Date.now() / 1000);
-  const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = btoa(JSON.stringify({
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const payload = b64url(JSON.stringify({
     iss: sa.client_email,
     scope: "https://www.googleapis.com/auth/cloud-platform",
     aud: sa.token_uri,
@@ -29,7 +37,6 @@ async function getAccessToken(): Promise<string> {
 
   const signInput = `${header}.${payload}`;
 
-  // Import the private key
   const pemContent = sa.private_key
     .replace("-----BEGIN PRIVATE KEY-----", "")
     .replace("-----END PRIVATE KEY-----", "")
@@ -50,9 +57,7 @@ async function getAccessToken(): Promise<string> {
     new TextEncoder().encode(signInput)
   );
 
-  const sig = btoa(String.fromCharCode(...new Uint8Array(signature)))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-
+  const sig = b64urlBytes(new Uint8Array(signature));
   const jwt = `${header}.${payload}.${sig}`;
 
   const tokenRes = await fetch(sa.token_uri, {
