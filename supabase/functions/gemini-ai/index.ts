@@ -6,49 +6,29 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const IMAGE_GEN_MODEL = "gemini-2.0-flash-exp";
-const VISION_MODEL = "gemini-2.5-flash";
-const CHAT_MODEL = "gemini-2.5-flash";
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
 
-function getApiKey(): string {
-  const key = Deno.env.get("GOOGLE_GEMINI_API_KEY");
-  if (!key) throw new Error("GOOGLE_GEMINI_API_KEY not configured");
-  return key;
-}
+// Models
+const IMAGE_GEN_MODEL = "google/gemini-2.5-flash-image";
+const VISION_MODEL = "google/gemini-2.5-flash";
+const CHAT_MODEL = "google/gemini-3-flash-preview";
 
-async function callGemini(model: string, apiKey: string, contents: any[], systemInstruction?: any, generationConfig?: any): Promise<any> {
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${apiKey}`;
-  const body: any = { contents };
-  if (systemInstruction) body.systemInstruction = systemInstruction;
-  if (generationConfig) body.generationConfig = generationConfig;
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+/** Helper to handle rate limit / payment errors */
+function handleErrorResponse(status: number, errText: string, context: string) {
+  console.error(`${context} error:`, status, errText);
+  if (status === 429) {
+    return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }), {
+      status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  if (status === 402) {
+    return new Response(JSON.stringify({ error: "Payment required. Please add credits to your workspace." }), {
+      status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  return new Response(JSON.stringify({ error: `${context} failed`, details: errText }), {
+    status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    console.error(`Gemini [${model}] error:`, resp.status, errText);
-    if (resp.status === 429) throw { status: 429, message: "Rate limit exceeded. Please try again." };
-    if (resp.status === 403) throw { status: 402, message: "API key quota exceeded or permission denied." };
-    throw new Error(`Gemini [${model}] failed [${resp.status}]: ${errText}`);
-  }
-
-  return await resp.json();
-}
-
-function extractText(data: any): string {
-  return data.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
-}
-
-function extractImage(data: any): string | null {
-  for (const part of (data.candidates?.[0]?.content?.parts || [])) {
-    if (part.inlineData) return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-  }
-  return null;
 }
 
 serve(async (req) => {
@@ -57,63 +37,133 @@ serve(async (req) => {
   }
 
   try {
-    const apiKey = getApiKey();
+    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+    if (!LOVABLE_API_KEY) {
+      return new Response(JSON.stringify({ error: "LOVABLE_API_KEY not configured" }), {
+        status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const body = await req.json();
     const { action, prompt, imageBase64, messages, systemPrompt } = body;
 
     // ── ACTION: generate-image ──
     if (action === "generate-image") {
-      const parts: any[] = [{ text: prompt || "Generate an image" }];
+      const contentParts: any[] = [
+        { type: "text", text: prompt || "Generate an image" },
+      ];
+
       if (imageBase64) {
-        const raw = imageBase64.startsWith("data:") ? imageBase64.split(",")[1] : imageBase64;
-        parts.push({ inlineData: { mimeType: "image/jpeg", data: raw } });
+        contentParts.push({
+          type: "image_url",
+          image_url: { url: imageBase64.startsWith("data:") ? imageBase64 : `data:image/jpeg;base64,${imageBase64}` },
+        });
       }
 
-      const data = await callGemini(IMAGE_GEN_MODEL, apiKey,
-        [{ role: "user", parts }],
-        undefined,
-        { responseModalities: ["IMAGE", "TEXT"] }
-      );
+      const resp = await fetch(GATEWAY_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LOVABLE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: IMAGE_GEN_MODEL,
+          messages: [{ role: "user", content: contentParts }],
+          modalities: ["image", "text"],
+        }),
+      });
 
-      return new Response(JSON.stringify({ image_url: extractImage(data), description: extractText(data) }), {
+      if (!resp.ok) {
+        return handleErrorResponse(resp.status, await resp.text(), "Image generation");
+      }
+
+      const data = await resp.json();
+      const msg = data.choices?.[0]?.message;
+      const description = msg?.content || "";
+
+      // Extract image from the images array (Lovable AI Gateway format)
+      const image_url = msg?.images?.[0]?.image_url?.url || null;
+
+      return new Response(JSON.stringify({ image_url, description }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // ── ACTION: vision ──
+    // ── ACTION: vision (analyze image with text prompt) ──
     if (action === "vision") {
       if (!imageBase64) {
         return new Response(JSON.stringify({ error: "imageBase64 is required for vision" }), {
           status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      const raw = imageBase64.startsWith("data:") ? imageBase64.split(",")[1] : imageBase64;
-      const data = await callGemini(VISION_MODEL, apiKey,
-        [{ role: "user", parts: [
-          { text: prompt || "Describe this image" },
-          { inlineData: { mimeType: "image/jpeg", data: raw } },
-        ]}]
-      );
-      return new Response(JSON.stringify({ text: extractText(data) }), {
+
+      const imageUrl = imageBase64.startsWith("data:") ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+
+      const resp = await fetch(GATEWAY_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LOVABLE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: VISION_MODEL,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: prompt || "Describe this image" },
+              { type: "image_url", image_url: { url: imageUrl } },
+            ],
+          }],
+        }),
+      });
+
+      if (!resp.ok) {
+        return handleErrorResponse(resp.status, await resp.text(), "Vision analysis");
+      }
+
+      const data = await resp.json();
+      const text = data.choices?.[0]?.message?.content || "";
+
+      return new Response(JSON.stringify({ text }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     // ── ACTION: chat ──
     if (action === "chat") {
-      const contents: any[] = [];
-      let sysInstruction = undefined;
-      if (systemPrompt) sysInstruction = { parts: [{ text: systemPrompt }] };
+      const chatMessages: any[] = [];
+
+      if (systemPrompt) {
+        chatMessages.push({ role: "system", content: systemPrompt });
+      }
 
       for (const msg of (messages || [])) {
-        contents.push({
-          role: msg.role === "assistant" ? "model" : "user",
-          parts: [{ text: msg.content }],
+        chatMessages.push({
+          role: msg.role === "assistant" ? "assistant" : "user",
+          content: msg.content,
         });
       }
 
-      const data = await callGemini(CHAT_MODEL, apiKey, contents, sysInstruction);
-      return new Response(JSON.stringify({ text: extractText(data) }), {
+      const resp = await fetch(GATEWAY_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${LOVABLE_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: CHAT_MODEL,
+          messages: chatMessages,
+        }),
+      });
+
+      if (!resp.ok) {
+        return handleErrorResponse(resp.status, await resp.text(), "Chat");
+      }
+
+      const data = await resp.json();
+      const text = data.choices?.[0]?.message?.content || "";
+
+      return new Response(JSON.stringify({ text }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -122,12 +172,7 @@ serve(async (req) => {
       status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
 
-  } catch (e: any) {
-    if (e?.status === 429 || e?.status === 402) {
-      return new Response(JSON.stringify({ error: e.message }), {
-        status: e.status, headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+  } catch (e) {
     console.error("gemini-ai error:", e);
     return new Response(
       JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
